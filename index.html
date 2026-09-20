@@ -278,7 +278,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="fPinned"><span>Only pinned markets</span></label>
     <label class="toggle"><input type="checkbox" id="fUnseen"><span>Only what is new since the last pull</span></label>
     <label class="toggle"><input type="checkbox" id="useYahoo"><span>Also try Yahoo News (blocked more often than not)</span></label>
-    <label class="toggle"><input type="checkbox" id="fastMode"><span>Fast mode: your markets' station feeds, one Google search and one API call — nothing else</span></label>
+    <label class="toggle"><input type="checkbox" id="fastMode"><span>Fast mode: station feeds for up to 20 markets (pinned first, then whoever is near a newscast), one Google search and one API call</span></label>
     <label class="toggle"><input type="checkbox" id="directMode"><span>Direct mode: read the stations' own feeds and the APIs only — no Google, Bing or public relays</span></label>
     <label class="toggle"><input type="checkbox" id="useSpanish" checked><span>Spanish desk: read Univision and Telemundo markets in Spanish and translate</span></label>
     <label class="toggle"><input type="checkbox" id="useLocal" checked><span>On a scan, also read each market's own feeds (local sites and Google's local edition)</span></label>
@@ -2867,15 +2867,19 @@ async function directSweep(){
 const FAST_GDELT = '("structure fire" OR "house fire" OR "fatal crash" OR "deadly crash" OR shooting OR stabbing OR standoff OR manhunt OR "amber alert" OR "water rescue" OR drowning OR lockdown OR "bomb threat" OR "gas leak" OR explosion OR evacuated OR "police chase" OR "flash flooding" OR tornado OR "plane crash" OR "helicopter crash" OR "people killed" OR "death toll")';
 const FAST_GOOGLE = '"structure fire" OR "house fire" OR "fatal crash" OR "shooting" OR "standoff" OR "manhunt" OR "Amber Alert" OR "water rescue" OR "gas leak" OR "police chase" OR "tornado warning" OR "helicopter crash"';
 let FAST_MODE = false;
-const FAST_STATIONS = 12;   /* markets read directly per fast sweep */
+const FAST_STATIONS = 20;   /* markets read directly per fast sweep */
 /* Fast sweep: the stations you care about, read straight from their own sites, plus one Google
    search for everything else and one keyed API call if you have a key. Nothing else runs. */
 async function fastSweep(){
   busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
-  const scope = (REGION==="ALL"
+  /* which markets get read directly, in order of how much you'd want them: pinned first, then
+     markets whose newscast is on or coming up, then the biggest. */
+  const pool = REGION==="ALL"
       ? DMAS.filter(d=>PINS.has(d.m) || slotFor(d, SLOT_ON.size?SLOT_ON:null))
-      : DMAS.filter(d=>inRegion(d))
-    ).slice(0, FAST_STATIONS);
+      : DMAS.filter(d=>inRegion(d));
+  const rank = d => (PINS.has(d.m) ? 0 : slotFor(d, SLOT_ON.size?SLOT_ON:null) ? 1 : 2);
+  const scope = pool.slice().sort((a,b)=>rank(a)-rank(b) || a.rank-b.rank).slice(0, FAST_STATIONS);
+  const skipped = pool.length - scope.length;
   const jobs = [];
   /* one station site per market keeps it quick; the second is picked up by a full or direct sweep */
   scope.forEach(d=>feedStations(d, 1).forEach(st=>{
@@ -2892,6 +2896,7 @@ async function fastSweep(){
   jobs.forEach(j=>j.then(()=>progress(++done, jobs.length, "Pulled "+done+" of "+jobs.length+" · "+Math.round((Date.now()-pullStart)/1000)+" s"), ()=>done++));
   await Promise.all(jobs);
   finish();
+  if(skipped>0) $("progTxt").textContent += " Read "+scope.length+" markets directly; "+skipped+" more in this region weren't, so use a scan or direct mode for those.";
 }
 
 async function deepScan(list){
