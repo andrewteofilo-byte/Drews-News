@@ -278,6 +278,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="fPinned"><span>Only pinned markets</span></label>
     <label class="toggle"><input type="checkbox" id="fUnseen"><span>Only what is new since the last pull</span></label>
     <label class="toggle"><input type="checkbox" id="useYahoo"><span>Also try Yahoo News (blocked more often than not)</span></label>
+    <label class="toggle"><input type="checkbox" id="directMode"><span>Direct mode: read the stations' own feeds and the APIs only — no Google, Bing or public relays</span></label>
     <label class="toggle"><input type="checkbox" id="useSpanish" checked><span>Spanish desk: read Univision and Telemundo markets in Spanish and translate</span></label>
     <label class="toggle"><input type="checkbox" id="useLocal" checked><span>On a scan, also read each market's own feeds (local sites and Google's local edition)</span></label>
     <input class="search" id="q" type="search" placeholder="Market, town, call sign, network, owner" style="margin-top:8px">
@@ -1934,7 +1935,11 @@ async function relayOnce(st, feedUrl, signal, onStart, maxWait){
   const t0 = Date.now();
   try{
     const res = await fetch(url, {signal});
-    if(!res.ok && !(mine && res.status===451)) throw new Error(name+" HTTP "+res.status+(res.status===429?" (rate limited)":""));
+    if(!res.ok && !(mine && res.status===451)){
+      const err = new Error(name+" HTTP "+res.status+(res.status===429?" (rate limited)":""));
+      if(mine && res.status>=400 && res.status<500 && res.status!==429) err.definitive = true;
+      throw err;
+    }
     let items;
     if(kind==="r2j"){
       const j = await res.json();
@@ -1955,7 +1960,10 @@ async function relayOnce(st, feedUrl, signal, onStart, maxWait){
       if(!/<(rss|feed|item)[\s>]/i.test(xml)){
         if(RELAY_EXCUSE.test(xml)) throw new Error(name+" wants its own key or is rate limited");
         const snip = xml.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,90);
-        throw new Error(name+" got no feed back"+(snip?": "+snip:""));
+        const err = new Error(name+" got no feed back"+(snip?": "+snip:""));
+        /* your own proxy reached the site and the site had no feed there — relays can't do better */
+        if(mine) err.definitive = true;
+        throw err;
       }
       items = parseRss(xml);
     }
@@ -1964,7 +1972,8 @@ async function relayOnce(st, feedUrl, signal, onStart, maxWait){
     if(st.gap && st.gap > RELAY_GAP) st.gap = Math.max(RELAY_GAP, st.gap*0.8);
     return items;
   }catch(e){
-    if(!(signal && signal.aborted)){
+    /* "that site has no feed" is the proxy working, not failing: it must not count against it */
+    if(!(signal && signal.aborted) && !e.definitive){
       const m = (e&&e.message)||"";
       if(/\b429\b|rate limit|too many requests|quota/i.test(m)){
         /* refused for going too fast: slow this relay down rather than writing it off */
@@ -2018,7 +2027,11 @@ async function relayRss(feedUrl, provenOnly){
       }, e=>{
         /* prefer an error that says what actually came back over a bare network failure */
         const m = (e&&e.message)||"";
-        if(!lastErr || (/got no feed back|wants its own key/.test(m) && !/got no feed back|wants its own key/.test(lastErr.message||""))) lastErr = e;
+        if(!lastErr || e.definitive || (/got no feed back|wants its own key/.test(m) && !/got no feed back|wants its own key/.test(lastErr.message||""))) lastErr = e;
+        if(e.definitive){   /* settled: stop the race rather than asking relays the same question */
+          done = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(shortTimer);
+          reject(e); return;
+        }
         if(/busy, moved on/.test(m) && next<order.length) launch();
         pending--;
         if(done) return;
@@ -2049,6 +2062,7 @@ async function fetchFeed(feedUrl){
     return await relayRss(feedUrl);
   }catch(e){
     const m = (e&&e.message)||"";
+    if(e.definitive) throw e;
     if(!/timed out|busy, moved on|all relays failed/i.test(m)) throw e;
     if(!RELAY_STATE.some(st=>st.lastOk)) throw e;
     return await relayRss(feedUrl, true);
@@ -2129,6 +2143,18 @@ async function pGdelt(q, span){
   const hit = CACHE.get(base);
   if(hit && Date.now()-hit.t < CACHE_TTL) return hit.items;
   let data, errs = [];
+  /* your own proxy first, since GDELT is one of the hosts it can serve */
+  if(proxyCan(base) && !SCRIPT_MODE){
+    try{
+      const txt = await (await timeoutFetch(proxyUrl(base+"&format=json"), null, 14000)).text();
+      const items0 = ((gdeltRead(txt).articles)||[]).map(a=>({title:(a.title||"").trim(), url:a.url, ms:gdeltDate(a.seendate), source:a.domain||"", srcUrl:a.url, desc:""}));
+      CACHE.set(base,{t:Date.now(),items:items0});
+      return items0;
+    }catch(e){
+      if(/GDELT says/.test((e&&e.message)||"")) throw e;    /* GDELT itself objected */
+      errs.push("your proxy: "+((e&&e.message)||"failed"));
+    }
+  }
   if(SCRIPT_MODE){
     const items0 = ((await jsonp(base)).articles||[]).map(a=>({title:(a.title||"").trim(), url:a.url, ms:gdeltDate(a.seendate), source:a.domain||"", srcUrl:a.url, desc:""}));
     CACHE.set(base,{t:Date.now(),items:items0});
@@ -2165,13 +2191,36 @@ async function pGdelt(q, span){
    far more reliable than a national search for small-market news. Which feed path a station site
    uses is remembered on this device, so a dead one is only tried once a day. */
 let USE_LOCAL = true;
+/* station websites, lifted from 11.5's stream register: 810 of them, covering every market */
+const DS_SITE = {"KFDX":"texomashomepage.com","KJTL":"texomashomepage.com","KTAB":"bigcountryhomepage.com","KRBC":"bigcountryhomepage.com","WKBW":"wkbw.com","KKTV":"kktv.com","KELO":"keloland.com","KETK":"ketk.com","KFXK":"ketk.com","WGAL":"wgal.com","KLTV":"kltv.com","WKTV":"wktv.com","WBTV":"wbtv.com","WSMV":"wsmv.com","WDTV":"wdtv.com","KFVS":"kfvs12.com","WCSC":"live5news.com","KCTV":"kctv5.com","WSFA":"wsfa.com","WAFF":"waff.com","WAFB":"wafb.com","WTVY":"wtvy.com","KSLA":"ksla.com","WNEM":"wnem.com","WOWT":"wowt.com","KOLO":"kolotv.com","WVLT":"wvlt.tv","KBTX":"kbtx.com","KWTX":"kwtx.com","KXII":"kxii.com","KAUZ":"newschannel6now.com","KSWO":"kswo.com","KTRE":"ktre.com","KCBD":"kcbd.com","KGNS":"kgns.tv","KFDA":"newschannel10.com","WCAX":"wcax.com","WVVA":"wvva.com","WSAZ":"wsaz.com","WTAP":"wtap.com","WEAU":"weau.com","WBAY":"wbay.com","WSAW":"wsaw.com","WILX":"wilx.com","WJHG":"wjhg.com","WCTV":"wctv.tv","WALB":"walb.com","WTOC":"wtoc.com","WTVM":"wtvm.com","WRDW":"wrdw.com","WLOX":"wlox.com","WLBT":"wlbt.com","WDAM":"wdam.com","WTOK":"wtok.com","WTVA":"wtva.com","WTHI":"wthitv.com","WLFI":"wlfi.com","WNDU":"wndu.com","KCRG":"kcrg.com","KWQC":"kwqc.com","KTIV":"ktiv.com","WIBW":"wibw.com","KWCH":"kwch.com","WBKO":"wbko.com","WKYT":"wkyt.com","WAVE":"wave3.com","KNOE":"knoe.com","KPLC":"kplctv.com","WAGM":"wagmtv.com","KEYC":"keyc.com","KTTC":"kttc.com","WFIE":"14news.com","WPTA":"wpta21.com","WIFR":"wifr.com","WABI":"wabi.tv","KMVT":"kmvt.com","WHSV":"whsv.com","WVIR":"nbc29.com","WWBT":"nbc12.com","WDBJ":"wdbj7.com","WMTV":"nbc15.com","KOSA":"cbs7.com","KAIT":"kait8.com","KALB":"kalb.com","KKCO":"nbc11news.com","KJCT":"nbc11news.com","WITN":"witn.com","WECT":"wect.com","WBNG":"wbng.com","WWNY":"wwnytv.com","KYTV":"ky3.com","KOLN":"1011now.com","KSNB":"1011now.com","KNOP":"knopnews2.com","WEEK":"25newsnow.com","WGEM":"wgem.com","KYOU":"kyoutv.com","WFSB":"wfsb.com","WWSB":"mysuncoast.com","WFLX":"wflx.com","KPHO":"azfamily.com","KTVK":"azfamily.com","KOLD":"kold.com","KVVU":"fox5vegas.com","WVUE":"fox8live.com","WXIX":"fox19.com","WOIO":"cleveland19.com","WTVG":"13abc.com","KPTV":"kptv.com","WIS":"wistv.com","WMBF":"wmbfnews.com","WMC":"actionnews5.com","KOTA":"blackhillsfox.com","KEVN":"blackhillsfox.com","KSFY":"dakotanewsnow.com","KDLT":"dakotanewsnow.com","KFYR":"kfyrtv.com","KVLY":"valleynewslive.com","KBJR":"northernnewsnow.com","KDLH":"northernnewsnow.com","KGMB":"hawaiinewsnow.com","KHNL":"hawaiinewsnow.com","KTUU":"alaskasnewssource.com","KAUU":"alaskasnewssource.com","KTVF":"webcenterfairbanks.com","WGGB":"westernmassnews.com","WSHM":"westernmassnews.com","WLUC":"uppermichiganssource.com","WBRC":"wbrc.com","WALA":"fox10tv.com","WPCH":"atlantanewsfirst.com","WANF":"atlantanewsfirst.com","WSMV2":"wsmv.com","KHSD":"blackhillsfox.com","KGPE":"yourcentralvalley.com","KSEE":"yourcentralvalley.com","WHTM":"abc27.com","WPMT":"fox43.com","WOOD":"woodtv.com","WOTV":"woodtv.com","WAVY":"wavy.com","WVBT":"wavy.com","KFOR":"kfor.com","KAUT":"freedom43tv.com","WIAT":"alabamas42.com","WGHP":"myfox8.com","WHAS":"whas11.com","KRQE":"krqe.com","WGNO":"wgno.com","WREG":"wreg.com","WATN":"localmemphis.com","WPRI":"wpri.com","WNAC":"foxprovidence.com","WRIC":"wric.com","WIVB":"wivb.com","WNLO":"cw23.com","WKRG":"wkrg.com","WBRE":"pahomepage.com","WYOU":"pahomepage.com","KARK":"kark.com","KLRT":"fox16.com","WGN":"wgntv.com","KTLA":"ktla.com","WPIX":"pix11.com","KLBK":"everythinglubbock.com","KAMC":"everythinglubbock.com","KMID":"yourbasin.com","KPEJ":"yourbasin.com","KAMR":"myhighplains.com","KCIT":"myhighplains.com","WJTV":"wjtv.com","WSPA":"wspa.com","WKBN":"wkbn.com","WYTV":"wytv.com","WLNS":"wlns.com","KLAS":"8newsnow.com","KTSM":"ktsm.com","WNCT":"wnct.com","WTEN":"news10.com","KLST":"conchovalleyhomepage.com","KSAN":"conchovalleyhomepage.com","WHBF":"ourquadcities.com","KLJB":"ourquadcities.com","WJET":"yourerie.com","WFXP":"yourerie.com","WTAJ":"wtaj.com","KSNT":"ksnt.com","KTKA":"ksnt.com","KARD":"myarklamiss.com","KTVE":"myarklamiss.com","WTVO":"mystateline.com","WQRF":"mystateline.com","WQOW":"wqow.com","WXOW":"wxow.com","WCIA":"wcia.com","WMBD":"centralillinoisproud.com","WNCN":"cbs17.com","WFRV":"wearegreenbay.com","KOIN":"koin.com","WTRF":"wtrf.com","WBOY":"wboy.com","KREX":"westernslopenow.com","KHON":"khon2.com","KDVR":"kdvr.com","WTTV":"cbs4indy.com","WWLP":"wwlp.com","WSYR":"localsyr.com","WWTI":"informnny.com","KDAF":"cw33.com","WNEP":"wnep.com","WCVB":"wcvb.com","WBAL":"wbaltv.com","WTAE":"wtae.com","WISN":"wisn.com","WESH":"wesh.com","WMUR":"wmur.com","KCRA":"kcra.com","KOAT":"koat.com","WVTM":"wvtm13.com","WYFF":"wyff4.com","WAPT":"wapt.com","KSBW":"ksbw.com","WXII":"wxii12.com","WLWT":"wlwt.com","WDSU":"wdsu.com","KMBC":"kmbc.com","WPBF":"wpbf.com","KETV":"ketv.com","WLKY":"wlky.com","KCCI":"kcci.com","KOCO":"koco.com","WMTW":"wmtw.com","WBBH":"nbc-2.com","KHBS":"4029tv.com","WPTZ":"mynbc5.com","WFAA":"wfaa.com","KHOU":"khou.com","WUSA":"wusa9.com","KSDK":"ksdk.com","WTSP":"wtsp.com","WTHR":"wthr.com","KGW":"kgw.com","KENS":"kens5.com","WBIR":"wbir.com","WCNC":"wcnc.com","WWL":"wwltv.com","WVEC":"13newsnow.com","KVUE":"kvue.com","KIII":"kiiitv.com","WZZM":"wzzm13.com","WGRZ":"wgrz.com","WXIA":"11alive.com","KARE":"kare11.com","KING":"king5.com","KPNX":"12news.com","KFMB":"cbs8.com","KUSA":"9news.com","WKYC":"wkyc.com","WTLV":"firstcoastnews.com","WMAZ":"13wmaz.com","KTHV":"thv11.com","KTVB":"ktvb.com","KCEN":"kcentv.com","WCSH":"newscentermaine.com","WLBZ":"newscentermaine.com","WQAD":"wqad.com","WXYZ":"wxyz.com","WEWS":"news5cleveland.com","WCPO":"wcpo.com","WMAR":"wmar2news.com","KNXV":"abc15.com","KJRH":"kjrh.com","KSHB":"kshb.com","WFTS":"abcactionnews.com","WPTV":"wptv.com","KGTV":"10news.com","KMGH":"denver7.com","WRTV":"wrtv.com","WTMJ":"tmj4.com","KERO":"23abc.com","WTXL":"wtxl.com","KRIS":"kristv.com","WTVQ":"wtvq.com","KOAA":"koaa.com","KPAX":"kpax.com","KRTV":"krtv.com","KTVQ":"ktvq.com","KXLF":"kxlf.com","KBZK":"kbzk.com","KOMO":"komonews.com","WJLA":"wjla.com","KATU":"katu.com","WKRC":"local12.com","KUTV":"kutv.com","WSYX":"abc6onyourside.com","WBFF":"foxbaltimore.com","WPGH":"wpxi.com","KTUL":"ktul.com","WHAM":"13wham.com","WCYB":"wcyb.com","KVAL":"kval.com","KTVL":"ktvl.com","WJAC":"wjactv.com","KBAK":"bakersfieldnow.com","WLOS":"wlos.com","WGME":"wgme.com","WJAR":"turnto10.com","KRCR":"krcrtv.com","WOAI":"news4sanantonio.com","KFDM":"kfdm.com","KVII":"abc7amarillo.com","KTXS":"ktxs.com","WABC":"abc7ny.com","WCBS":"cbsnews.com","WNBC":"nbcnewyork.com","WNYW":"fox5ny.com","KABC":"abc7.com","KCBS":"cbsnews.com","KNBC":"nbclosangeles.com","KTTV":"foxla.com","WLS":"abc7chicago.com","WBBM":"cbsnews.com","WMAQ":"nbcchicago.com","WFLD":"fox32chicago.com","WPVI":"6abc.com","KYW":"cbsnews.com","WCAU":"nbcphiladelphia.com","WTXF":"fox29.com","KGO":"abc7news.com","KPIX":"cbsnews.com","KNTV":"nbcbayarea.com","KTVU":"ktvu.com","WPLG":"local10.com","WFOR":"cbsnews.com","WTVJ":"nbcmiami.com","WSVN":"wsvn.com","WHIO":"whio.com","WDTN":"wdtn.com","WKEF":"dayton247now.com","KXLY":"kxly.com","KREM":"krem.com","KHQ":"khq.com","KAYU":"fox28spokane.com","WTVC":"newschannel9.com","WDEF":"wdef.com","WRCB":"local3news.com","KRGV":"krgv.com","KVEO":"valleycentral.com","WWTV":"9and10news.com","WPBN":"upnorthlive.com","WGTU":"upnorthlive.com","KAPP":"kapptv.com","KIMA":"kimatv.com","KNDO":"nonstoplocal.com","KEYT":"keyt.com","KSBY":"ksby.com","KATC":"katc.com","KLFY":"klfy.com","KADN":"kadn.com","KMIZ":"abc17news.com","KRCG":"krcgtv.com","KOMU":"komu.com","WBOC":"wboc.com","WMDT":"wmdt.com","KESQ":"kesq.com","KMIR":"kmir6.com","KODE":"fourstateshomepage.com","KSNF":"fourstateshomepage.com","KOAM":"koamnewsnow.com","WCJB":"wcjb.com","KIFI":"localnews8.com","KPVI":"kpvi.com","KYMA":"kyma.com","WBBJ":"wbbjtv.com","WETM":"mytwintiers.com","WENY":"weny.com","KTVZ":"ktvz.com","KOHD":"centraloregondaily.com","KIEM":"redwoodnewschannel.com","WLIO":"hometownstations.com","KGWN":"wyomingnewsnow.com","KCWY":"wyomingnewsnow.com","KQTV":"kq2.com","KNPN":"newspressnow.com","WHIZ":"whiznews.com","KAVU":"crossroadstoday.com","KTVH":"ktvh.com","KXLH":"kxlh.com","KJUD":"alaskasnewssource.com","KXGN":"kxgn.com","WABG":"deltanews.tv","WXVT":"deltanews.tv","KABB":"foxsanantonio.com","KEYE":"cbsaustin.com","KDBC":"cbs4local.com","KFOX":"kfoxtv.com","KMPH":"kmph.com","KATV":"katv.com","KBOI":"idahonews.com","WSBT":"wsbt.com","KGAN":"cbs2iowa.com","WEYI":"nbc25news.com","WWMT":"wwmt.com","KSNV":"news3lv.com","WRGB":"cbs6albany.com","WSTM":"cnycentral.com","WCHS":"wchstv.com","WLUK":"fox11online.com","WEAR":"weartv.com","WPMI":"local15tv.com","WBMA":"abc3340.com","WPDE":"wpde.com","WACH":"wach.com","WCIV":"abcnews4.com","WZTV":"fox17.com","KOKH":"okcfox.com","WNWO":"nbc24.com","WHP":"local21news.com","KEPR":"keprtv.com","WGXA":"wgxa.tv","WFXL":"wfxl.com","KECI":"nbcmontana.com","KMTR":"nbc16.com","KRNV":"mynews4.com","KRXI":"foxreno.com","KDNL":"abcstlouis.com","WVUE2":"fox8live.com","KOTA2":"blackhillsfox.com","WDBD":"wlbt.com","WLOO":"wlbt.com","KWES":"newswest9.com","WCTI":"wcti12.com","KGWC":"wyomingnewsnow.com","KTWO":"k2radio.com","WPTA2":"wpta21.com","WISE":"wpta21.com","KTVM":"nbcmontana.com","KCFW":"nbcmontana.com","KFBB":"kfbb.com","KTGF":"nbcmontana.com","KSTP":"kstp.com","KAAL":"kaaltv.com","WDIO":"wdio.com","KOB":"kob.com","WNYT":"wnyt.com","WHEC":"whec.com","WDAY":"wday.com","WDAZ":"wday.com","KBMY":"kbmy.com","KNBN":"newscenter1.tv","WKBT":"wkbt.com","WBUP":"abc10up.com","KGWN2":"wyomingnewsnow.com","KJNB":"kjnbtv.com","KTBY":"youralaskalink.com","KYUR":"youralaskalink.com","WGBC":"wgbctv.com","WSB":"wsbtv.com","WFTV":"wftv.com","WHIO2":"whio.com","KIRO":"kiro7.com","WPXI":"wpxi.com","WSOC":"wsoctv.com","WJAX":"actionnewsjax.com","WFOX":"actionnewsjax.com","KOKI2":"fox23.com","WHBQ":"fox13memphis.com","KWTV":"news9.com","KFOR2":"kfor.com","WPVI2":"6abc.com","KEZI":"kezi.com","KDRV":"kdrv.com","WCAU2":"nbcphiladelphia.com","KOIN2":"koin.com","WPRI2":"wpri.com","KTVT":"cbsnews.com","KXAS":"nbcdfw.com","KDFW":"fox4news.com","KTRK":"abc13.com","KPRC":"click2houston.com","KRIV":"fox26houston.com","WAGA":"fox5atlanta.com","WRC":"nbcwashington.com","WTTG":"fox5dc.com","WBZ":"cbsnews.com","WBTS":"nbcboston.com","WFXT":"boston25news.com","KSAZ":"fox10phoenix.com","WFLA":"wfla.com","WTVT":"fox13news.com","KCPQ":"fox13seattle.com","WWJ":"cbsnews.com","WDIV":"clickondetroit.com","WJBK":"fox2detroit.com","WCCO":"cbsnews.com","KMSP":"fox9.com","KCNC":"cbsnews.com","WKMG":"clickorlando.com","WOFL":"fox35orlando.com","WJW":"fox8.com","KXTV":"abc10.com","KOVR":"cbsnews.com","KTXL":"fox40.com","WJZY":"qcnews.com","KMOV":"firstalert4.com","KTVI":"fox2now.com","KDKA":"cbsnews.com","WTVD":"abc11.com","WRAL":"wral.com","WRAZ":"wral.com","WXIN":"fox59.com","KNSD":"nbcsandiego.com","KSWB":"fox5sandiego.com","WKRN":"wkrn.com","WTVF":"newschannel5.com","WJZ":"cbsnews.com","KTVX":"abc4.com","KSL":"ksl.com","KSTU":"fox13now.com","KSAT":"ksat.com","WBNS":"10tv.com","WCMH":"nbc4i.com","WDAF":"fox4kc.com","WDJT":"cbs58.com","WITI":"fox6now.com","WTNH":"wtnh.com","WVIT":"nbcconnecticut.com","WTIC":"fox61.com","KTNV":"ktnv.com","WHNS":"foxcarolina.com","KXAN":"kxan.com","KTBC":"fox7austin.com","WPEC":"cbs12.com","WJXX":"firstcoastnews.com","WXMI":"fox17online.com","WTKR":"wtkr.com","WFMY":"wfmynews2.com","WXLV":"abc45.com","WDRB":"wdrb.com","WLNE":"abc6.com","KFSN":"abc30.com","WTVR":"wtvr.com","WOLF":"fox56.com","WXXA":"fox23news.com","WATE":"wate.com","WLEX":"lex18.com","WDKY":"foxlexington.com","KGUN":"kgun9.com","KVOA":"kvoa.com","KITV":"kitv.com","WOI":"weareiowa.com","WHO":"who13.com","WGBA":"nbc26.com","KSNW":"ksn.com","WSET":"wset.com","WSLS":"wsls.com","WFXR":"wfxrtv.com","WKOW":"wkow.com","WISC":"channel3000.com","KMTV":"3newsnow.com","WJRT":"abc12.com","KOLR":"ozarksfirst.com","KSPR":"ozarksfirst.com","WLTX":"wltx.com","WOLO":"wolo.com","WROC":"rochesterfirst.com","WOWK":"wowktv.com","WTOL":"wtol.com","WHNT":"whnt.com","WZDX":"rocketcitynow.com","WPSD":"wpsdlocal6.com","KXXV":"kxxv.com","KWKT":"fox44news.com","WTVH":"cnycentral.com","KRDO":"krdo.com","KXRM":"fox21news.com","WICS":"newschannel20.com","WAND":"wandtv.com","WRSP":"foxillinois.com","KTBS":"ktbs.com","KTAL":"ktalnews.com","KMSS":"arklatexhomepage.com","KIVI":"idahonews.com","WJCL":"wjcl.com","WSAV":"wsav.com","KWWL":"kwwl.com","KVIA":"kvia.com","WBRZ":"wbrz.com","WVLA":"louisianafirstnews.com","WBND":"abc57.com","WCBD":"counton2.com","KNWA":"nwahomepage.com","KFTA":"nwahomepage.com","WVNY":"mychamplainvalley.com","WFFF":"mychamplainvalley.com","WBTW":"wbtw.com","WJHL":"wjhl.com","KTVN":"2news.com","WINK":"winknews.com","WZVN":"abc-7.com","WFTX":"fox4now.com","WEHT":"tristatehomepage.com","KLKN":"klkntv.com","WANE":"wane.com","WJBF":"wjbf.com","WFXG":"wfxg.com","KYTX":"cbs19.tv","KVRR":"kvrr.com","WFMJ":"wfmj.com","WMGT":"41nbc.com","WAKA":"wakatv.com","WNCF":"alabamanews.net","KGET":"kget.com","KION":"kion546.com","WRBL":"wrbl.com","WLTZ":"wltz.com","WXTX":"wtvm.com","WEVV":"wevv.com","WLAJ":"wlns.com","WSYM":"fox47.com","WFQX":"upnorthlive.com","KLSR":"kval.com","KFFX":"kapptv.com","KCOY":"keyt.com","KKFX":"keyt.com","KLAF":"kadn.com","KCBA":"kion546.com","WATM":"wjactv.com","WWCP":"wjactv.com","WTLH":"wtxl.com","WEMT":"wcyb.com","WFXI":"wcti12.com","WYFX":"wkbn.com","WYZZ":"centralillinoisproud.com","WKMG2":"clickorlando.com","KBSI":"kbsi23.com","WSIL":"wsiltv.com","WAAY":"waaytv.com","WFFT":"wfft.com","WCOV":"wcov.com","KNIN":"kivitv.com","KSAS":"foxkansas.com","KAKE":"kake.com","WMSN":"fox47madison.com","KPTM":"fox42kptm.com","WSMH":"nbc25news.com","WUHF":"13wham.com","WSYT":"cnycentral.com","WTNZ":"fox43knoxville.com","WRLH":"foxrichmond.com","WUTV":"wutv.com","WPFO":"wgme.com","WUPW":"nbc24.com","KDSM":"kdsm.com","KRBK":"ozarksfirst.com","WFXB":"wbtw.com","KFXV":"valleycentral.com","WJHL2":"wjhl.com","WEVV2":"wevv.com","WGMB":"louisianafirstnews.com","WTTE":"abc6onyourside.com","WRGT":"dayton247now.com","WVAH":"wchstv.com","KFXA":"cbs2iowa.com","WTAT":"abcnews4.com","WTGS":"wtgs.com","KMSB":"kold.com","WTWC":"wtwc40.com","KHGI":"nebraska.tv","KFXL":"nebraska.tv","KBFX":"bakersfieldnow.com","WLAX":"weau.com","WEUX":"weau.com","WWAY":"wwaytv3.com","WSFX":"wect.com","KZTV":"kztv10.com","KHSL":"actionnewsnow.com","KNVN":"actionnewsnow.com","KCVU":"actionnewsnow.com","WCBI":"wcbi.com","WLOV":"wtva.com","WREX":"wrex.com","WAOW":"waow.com","WJFW":"wjfw.com","WZAW":"wsaw.com","KTMJ":"ksnt.com","KQFX":"abc17news.com","KOBI":"kobi5.com","KMVU":"kobi5.com","KBMT":"12newsnow.com","KBTV":"kfdm.com","KQDS":"kqdsfox21.com","WRDE":"wboc.com","KCAU":"siouxlandproud.com","KMEG":"siouxlandnews.com","KPTH":"siouxlandnews.com","KPSP":"kesq.com","KDFX":"kesq.com","WSEE":"erienewsnow.com","WICU":"erienewsnow.com","KFJX":"koamnewsnow.com","KJTV":"kcbd.com","WSWG":"wctv.tv","WTWO":"mywabashvalley.com","WAWV":"mywabashvalley.com","WOAY":"woay.com","WVNS":"wvnstv.com","WVII":"foxbangor.com","WFVX":"foxbangor.com","KIMT":"kimt.com","KXLT":"kttc.com","WTOV":"wtov9.com","WIVT":"binghamtonhomepage.com","WBGH":"binghamtonhomepage.com","WICZ":"wicz.com","WMBB":"mypanhandle.com","WECP":"mypanhandle.com","WPGX":"wjhg.com","WXXV":"wxxv25.com","KNDX":"kfyrtv.com","KXND":"kfyrtv.com","KTEN":"kten.com","WOGX":"fox35orlando.com","WGFL":"wgfltv.com","KIDK":"localnews8.com","KXPI":"localnews8.com","WVFX":"wdtv.com","WUTR":"cnyhomepage.com","WFXV":"cnyhomepage.com","KIDY":"foxwesttexas.com","KXVA":"foxwesttexas.com","WYDC":"wetmtv.com","KECY":"kyma.com","KYMA2":"kyma.com","WNBW":"wcjb.com","KSCC":"kztv10.com","WILM":"wwaytv3.com","KOKI":"fox23.com","WHLT":"wjtv.com","WHPM":"wdam.com","KTMF":"nbcmontana.com","KSVI":"yourbigsky.com","KHMT":"yourbigsky.com","KULR":"kulr8.com","KHQA":"khqa.com","WDHN":"wdhn.com","WRGX":"wsfa.com","WDFX":"wdhn.com","WNBJ":"wbbjtv.com","WJKT":"wbbjtv.com","WVNC":"wwnytv.com","WNYF":"wwnytv.com","WSVF":"whsv.com","KLAX":"klax-tv.com","WNTZ":"klax-tv.com","WZMQ":"uppermichiganssource.com","WNKY":"wnky.com","WCAV":"cbs19news.com","WVAW":"cbs19news.com","WAHU":"cbs19news.com","KFQX":"westernslopenow.com","WMDN":"wgbctv.com","KYLX":"kgns.tv","KXOF":"kgns.tv","KVHP":"kplctv.com","KSWL":"kplctv.com","KWYB":"abcfoxmontana.com","WNBD":"deltanews.tv","KBNZ":"centraloregondaily.com","KFXO":"ktvz.com","WOVA":"wtap.com","KTFT":"ktvb.com","KSVT":"kmvt.com","KAEF":"krcrtv.com","KVIQ":"redwoodnewschannel.com","KBVU":"krcrtv.com","KBGF":"kfbb.com","WLQP":"hometownstations.com","WOHL":"hometownstations.com","KCHY":"wyomingnewsnow.com","KLWY":"wyomingnewsnow.com","KTXE":"ktxs.com","KFNB":"wyomingnewsnow.com","KMNF":"keyc.com","KTVO":"ktvo.com","KCJO":"newspressnow.com","KNPG":"newspressnow.com","KATN":"alaskasnewssource.com","KXDF":"webcenterfairbanks.com","KXTS":"crossroadstoday.com","KMOL":"crossroadstoday.com","KVCT":"crossroadstoday.com","KHBB":"ktvh.com","KXLJ":"alaskasnewssource.com","KNPL":"knopnews2.com","KIIT":"knopnews2.com","WJXT":"news4jax.com","WHDH":"whdh.com","KCAL":"cbsnews.com","KMEX":"univision.com","WXTV":"univision.com","KUSI":"kusi.com","KRON":"kron4.com","WLTV":"univision.com","WSCV":"telemundo51.com","KXLN":"univision.com","KUVN":"univision.com","KTVW":"univision.com","WFMZ":"wfmz.com","WBKB":"wbkb11.com"};
 const CALL_DOMAIN = {};
-Object.keys(DOMAIN_CALL).forEach(dom=>{ const c = DOMAIN_CALL[dom]; if(c && !CALL_DOMAIN[c]) CALL_DOMAIN[c] = dom; });
+Object.keys(DS_SITE).forEach(c=>{ CALL_DOMAIN[c] = DS_SITE[c]; });
+Object.keys(DOMAIN_CALL).forEach(dom=>{ const c = DOMAIN_CALL[dom]; if(c) CALL_DOMAIN[c] = dom; });   /* the hand-checked ones win */
 const FEEDPATH_KEY = "ds-hyperlocal-feedpaths";
 let FEEDPATH = {};
 function feedPathLoad(){ return storeGet(FEEDPATH_KEY,{}).then(v=>{ FEEDPATH = v||{}; }); }
 function feedPathSave(){ storeSet(FEEDPATH_KEY, FEEDPATH); }
-const FEED_PATHS = ["/feed/","/rss","/?feed=rss2","/feeds/rss"];
+/* newsroom groups build their sites on different platforms, so the likely feed path differs */
+const FEED_PATHS = ["/feed/","/rss/","/arc/outboundfeeds/rss/?outputType=xml","/feeds/syndication/rss/","/?feed=rss2","/rss.xml"];
+const OWNER_PATHS = {
+  "Nexstar":["/feed/","/?feed=rss2"],
+  "Tegna":["/feeds/syndication/rss/","/feed/"],
+  "Gray":["/rss/","/feed/"],
+  "Scripps":["/arc/outboundfeeds/rss/?outputType=xml","/feed/"],
+  "Sinclair":["/feed/","/rss/"],
+  "Hearst":["/feed/","/rss/"],
+  "Fox O&O":["/rss/","/feed/"],
+  "CBS O&O":["/latest/rss/","/feed/"],
+  "NBC O&O":["/feed/","/rss/"],
+  "ABC O&O":["/feed/","/rss/"],
+  "Allen Media":["/feed/","/rss/"],
+  "Cox":["/feed/","/rss/"]
+};
+function pathsFor(call){
+  const owner = DS_OWNERS[baseCall(call)] || "";
+  const key = Object.keys(OWNER_PATHS).find(o=>owner.indexOf(o)===0);
+  return (key ? OWNER_PATHS[key] : FEED_PATHS).slice(0,2);
+}
 async function pGeo(place){
   const u = "https://news.google.com/rss/headlines/section/geo/"+encodeURIComponent(place)+"?hl=en-US&gl=US&ceid=US:en";
   const items = await fetchFeed(u);
@@ -2184,7 +2233,7 @@ async function pStation(call){
   if(known && known.t && Date.now()-known.t > 24*3600e3) delete FEEDPATH[dom];
   if(FEEDPATH[dom] && FEEDPATH[dom].path===null) return [];      /* tried today, has no feed */
   /* one attempt per site per day: a site that ignores /feed/ is remembered as having none */
-  const paths = FEEDPATH[dom] && FEEDPATH[dom].path ? [FEEDPATH[dom].path] : FEED_PATHS.slice(0,1);
+  const paths = FEEDPATH[dom] && FEEDPATH[dom].path ? [FEEDPATH[dom].path] : pathsFor(call);
   for(const path of paths){
     try{
       const items = await fetchFeed("https://"+dom+path);
@@ -2214,6 +2263,10 @@ function feedStations(d, n){
    Translation is free and unkeyed, so it can fail — when it does, a small newsroom glossary gets the
    story classified anyway rather than dropping it. */
 let USE_SPANISH = true;
+/* Direct mode: the stations' own feeds plus the keyed APIs and GDELT, all through your proxy.
+   No Google, no Bing, no public relays — nothing that has been failing. */
+let DIRECT_MODE = false;
+const DIRECT_CAP = 60;
 const TRANS = new Map();          /* original -> english, for this session */
 const GLOSS = [
   /* phrases first, so "incendio de casa" becomes "house fire" rather than "fire of house" */
@@ -2579,6 +2632,7 @@ async function sweep(){
   if(busy) return;
   busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
   const feed = fn => async()=>{ const r = await fn(); ingest(r, null); livePaint(); return []; };
+  if(DIRECT_MODE) return directSweep();
   const tasks = [];
   /* if the relays refused us last time, ask for less: six wider searches instead of twelve,
      and Bing only on the first few, since it mostly repeats what Google already has */
@@ -2607,7 +2661,10 @@ async function sweep(){
   await Promise.all([
     pool(tasks, lanes(), tick),
     (async()=>{ for(const t of gd){ if(STOP) break; await t(); tick(); } })(),
-    loadNational(true).then(()=>{ tick(); livePaint(true); }, ()=>tick())
+    Promise.race([
+      loadNational(true),
+      new Promise(r=>setTimeout(r, 20000))
+    ]).then(()=>{ tick(); livePaint(true); }, ()=>tick())
   ]);
   finish();
 }
@@ -2747,6 +2804,42 @@ btn.textContent = nx ? "None in window · next "+nx.st.call+" "+nx.slot.label+" 
   }
 }
 
+/* Direct sweep: every station site in scope, read one after another through your proxy. Scope is
+   whatever the region box says; with no region set it is your pinned markets plus the markets whose
+   newscast is on or coming up, since those are the ones you would be watching. */
+function directScope(){
+  let list = DMAS.filter(d=>inRegion(d));
+  if(REGION==="ALL"){
+    const near = DMAS.filter(d=>PINS.has(d.m) || slotFor(d, SLOT_ON.size?SLOT_ON:null));
+    list = near.length ? near : DMAS.slice().sort((a,b)=>a.rank-b.rank);
+  }
+  return list.slice(0, DIRECT_CAP);
+}
+async function directSweep(){
+  const list = directScope();
+  const tasks = [];
+  list.forEach(d=>{
+    feedStations(d, 2).forEach(st=>tasks.push(async()=>{
+      const r = await run("station",()=>pStation(st.call));
+      ingest(r, [d.id]); livePaint(); return [];
+    }));
+  });
+  const k = nextKeyed();
+  if(k) tasks.push(async()=>{ const r = await run(k[0],()=>k[1](k[2])); ingest(r,null); livePaint(); return []; });
+  const gd = [()=>run("gdelt",()=>pGdelt(GDELT_Q[0],"3h")), ()=>run("gdelt",()=>pGdelt(GDELT_BIG,"24h"))];
+  let total = tasks.length + gd.length + 1, done = 0;
+  const tick = () => { done++; progress(done,total,"Read "+done+" of "+total+" sources · "+Math.round((Date.now()-pullStart)/1000)+" s"); };
+  await Promise.all([
+    pool(tasks, PROXY_URL ? 6 : 3, tick),
+    (async()=>{ for(const t of gd){ if(STOP) break; const r = await t(); ingest(r,null); livePaint(); tick(); } })(),
+    Promise.race([
+      loadNational(true),
+      new Promise(r=>setTimeout(r, 20000))
+    ]).then(()=>{ tick(); livePaint(true); }, ()=>tick())
+  ]);
+  finish();
+}
+
 async function deepScan(list){
   if(busy){ STOP = true; return; }
   if(!list || !list.length) return;
@@ -2785,7 +2878,7 @@ async function deepScan(list){
 
 function setBusy(on, mode){
   $("sweep").disabled = on && mode!=="sweep";
-  $("sweep").textContent = on && mode==="sweep" ? "Sweeping…" : "Sweep all markets";
+  $("sweep").textContent = on && mode==="sweep" ? "Sweeping…" : (DIRECT_MODE ? "Read station feeds" : "Sweep all markets");
   if(on && mode==="scan"){ $("scanGo").textContent = "Stop"; $("scanGo").disabled = false; }
   if(on && mode==="sweep") $("scanGo").disabled = true;
   $("tally").classList.toggle("on", on);
@@ -2985,7 +3078,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -3267,11 +3360,15 @@ function natPlaces(t){
 }
 async function loadNational(force){
   if(!force && natState.t && Date.now()-natState.t < 10*60e3) return natState;
-  const got = [].concat(...await Promise.all([
-    run("google",()=>pGoogle("breaking news")),
-    run("bing",()=>pBing("breaking news United States")),
-    run("yahoo",()=>pYahoo("breaking news"))
-  ]));
+  /* in direct mode the national check goes through GDELT, which your proxy can reach,
+     rather than Google and Bing, which it cannot */
+  const got = DIRECT_MODE
+    ? await run("gdelt",()=>pGdelt('("breaking news" OR "special report" OR "press conference" OR "state of emergency" OR "mass shooting" OR "plane crash" OR dies OR resigns)', "3h"))
+    : [].concat(...await Promise.all([
+        run("google",()=>pGoogle("breaking news")),
+        run("bing",()=>pBing("breaking news United States")),
+        run("yahoo",()=>pYahoo("breaking news"))
+      ]));
   const rec = {checked:true,t:Date.now(),level:0,tags:[],heads:[],src:"",since:0,nets:[],places:[]};
   rec.src = [...new Set(got.map(a=>PROVIDER_NAMES[a.prov]))].join(" + ");
   const hits = {};
@@ -3526,6 +3623,7 @@ function init(){
   $("useYahoo").addEventListener("change",e=>{ useYahoo=e.target.checked; filtersSave(); });
   $("useLocal").addEventListener("change",e=>{ USE_LOCAL=e.target.checked; filtersSave(); });
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
+  $("directMode").addEventListener("change",e=>{ DIRECT_MODE=e.target.checked; filtersSave(); setBusy(false); updateTargets(); });
   storeGet(PROXY_KEY,"").then(v=>{ if(v){ PROXY_URL = v; $("proxyUrl").value = v; } });
   storeGet(PROXY_NO_KEY,[]).then(v=>{ (v||[]).forEach(x=>PROXY_NO.add(x)); });
   $("proxyUrl").addEventListener("change",e=>{
@@ -3753,6 +3851,7 @@ function init(){
     if(typeof f.yahoo==="boolean"){ useYahoo=f.yahoo; $("useYahoo").checked=f.yahoo; }
     if(typeof f.local==="boolean"){ USE_LOCAL=f.local; $("useLocal").checked=f.local; }
     if(typeof f.spanish==="boolean"){ USE_SPANISH=f.spanish; $("useSpanish").checked=f.spanish; }
+    if(typeof f.direct==="boolean"){ DIRECT_MODE=f.direct; $("directMode").checked=f.direct; }
     if(f.size && SIZE_TEST[f.size]){ SIZE=f.size; $("size").value=f.size; }
     if(f.sort && SORTS[f.sort]){ SORT=f.sort; $("sort").value=f.sort; }
     if(Array.isArray(f.slots)){
