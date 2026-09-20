@@ -1817,7 +1817,7 @@ const RELAY_EXCUSE = /valid api key is required|console\.corsproxy|sign ?up|rate
 /* Relays are raced rather than tried one after another. The relay that answered most recently
    goes first; if it hasn't answered within HEDGE_MS the next one starts alongside it, and the first
    good feed wins. A relay that keeps failing is benched for a few minutes so it stops costing time. */
-const HEDGE_MS = 1800, BENCH_MS = 5*60e3;
+const HEDGE_MS = 1500, BENCH_MS = 5*60e3;
 /* Opened as a downloaded file the page's origin is file://, and browsers block fetch() there
    outright. Script tags are still allowed, so in that case everything that offers a JSONP
    callback is loaded that way instead: rss2json for feeds, GDELT for its own API. */
@@ -1848,12 +1848,27 @@ const RELAY_STATE = RELAYS.map((r,i)=>({i, fails:0, benchedUntil:0, lastOk:0, av
 const RELAY_MAX = 2, RELAY_GAP = 400, RELAY_GAP_MAX = 6000;
 let relayTurn = 0;
 function relayFree(st){ return st.inflight < RELAY_MAX; }
-async function relaySlot(st){
-  while(!relayFree(st)) await new Promise(r=>st.waiters.push(r));
+/* Waiting for a relay's turn is not the same as the relay being slow, so the wait is capped and
+   never counted against the request's own deadline: a relay that would keep us queueing is passed
+   over for this request and tried later. */
+async function relaySlot(st, maxWait){
+  const t0 = Date.now();
+  while(!relayFree(st)){
+    if(Date.now()-t0 > (maxWait||4000)) return false;
+    await Promise.race([
+      new Promise(r=>st.waiters.push(r)),
+      new Promise(r=>setTimeout(r, 250))
+    ]);
+  }
   const gap = st.gap || RELAY_GAP;
   const since = Date.now()-st.lastStart;
-  if(since < gap) await new Promise(r=>setTimeout(r, gap-since));
+  const need = gap - since;
+  if(need > 0){
+    if(Date.now()-t0+need > (maxWait||4000)) return false;
+    await new Promise(r=>setTimeout(r, need));
+  }
   st.inflight++; st.lastStart = Date.now();
+  return true;
 }
 function relayRelease(st){
   st.inflight--;
@@ -1873,9 +1888,10 @@ function relayOrder(){
   /* one proven relay: put a free one first so we don't queue behind it */
   return live.slice().sort((a,b)=>(relayFree(b)?1:0)-(relayFree(a)?1:0));
 }
-async function relayOnce(st, feedUrl, signal){
+async function relayOnce(st, feedUrl, signal, onStart){
   const {url,kind,name} = RELAYS[st.i](feedUrl);
-  await relaySlot(st);
+  if(!(await relaySlot(st))) throw new Error(name+" is busy, moved on");
+  if(onStart) onStart();
   const t0 = Date.now();
   try{
     const res = await fetch(url, {signal});
@@ -1930,6 +1946,12 @@ async function relayRss(feedUrl){
   const ctls = [], live = new Set();
   const items = await new Promise((resolve,reject)=>{
     let pending = 0, next = 0, done = false, timer = null, lastErr = null, shortTimer = null;
+    let deadlineTimer = null, started = false;
+    const armDeadline = () => {   /* starts when a relay actually begins fetching, not while queueing */
+      if(started) return;
+      started = true;
+      deadlineTimer = setTimeout(deadline, 6500);
+    };
     const launch = () => {
       if(done || next>=order.length) return;
       const st = order[next++];
@@ -1937,28 +1959,31 @@ async function relayRss(feedUrl){
       ctls.push(ctl); pending++; live.add(st);
       clearTimeout(timer);
       timer = setTimeout(launch, HEDGE_MS);
-      relayOnce(st, feedUrl, ctl && ctl.signal).finally(()=>live.delete(st)).then(r=>{
-        if(done) return; done = true; clearTimeout(timer); resolve(r);
+      relayOnce(st, feedUrl, ctl && ctl.signal, armDeadline).finally(()=>live.delete(st)).then(r=>{
+        if(done) return; done = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(shortTimer); resolve(r);
       }, e=>{
         /* prefer an error that says what actually came back over a bare network failure */
         const m = (e&&e.message)||"";
         if(!lastErr || (/got no feed back|wants its own key/.test(m) && !/got no feed back|wants its own key/.test(lastErr.message||""))) lastErr = e;
+        if(/busy, moved on/.test(m) && next<order.length) launch();
         pending--;
         if(done) return;
         if(next<order.length) launch();           /* failed fast: start the next one now */
-        else if(!pending){ done = true; clearTimeout(timer); reject(lastErr||new Error("all relays failed")); }
+        else if(!pending){ done = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(shortTimer); reject(lastErr||new Error("all relays failed")); }
         else if(!shortTimer) shortTimer = setTimeout(deadline, 2500);   /* only a hanging relay left: give it a little longer, not the full deadline */
       });
     };
     launch();
     const deadline = ()=>{
       if(done) return;
-      done = true; clearTimeout(timer);
+      done = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(shortTimer);
       /* anything still hanging at the deadline counts as a failure, so a dead relay gets benched */
-      live.forEach(st=>{ st.fails++; if(st.fails>=3){ st.benchedUntil = Date.now()+BENCH_MS; st.fails = 0; } });
+      /* a relay that hangs is worse than one that fails fast, so it is benched sooner */
+      live.forEach(st=>{ st.fails += 2; if(st.fails>=3){ st.benchedUntil = Date.now()+BENCH_MS; st.fails = 0; } });
       reject(new Error("relays timed out"));
     };
-    setTimeout(deadline, 8000);
+    /* a backstop in case every relay is busy and nothing ever starts */
+    setTimeout(()=>{ if(!started) deadline(); }, 15000);
   }).finally(()=>ctls.forEach(c=>{ try{ c && c.abort(); }catch(e){} }));
   CACHE.set(feedUrl,{t:Date.now(),items});
   return items;
