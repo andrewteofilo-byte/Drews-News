@@ -293,6 +293,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label for="k_gnews">GNews.io · 100/day</label>
     <input id="k_gnews" data-k="gnews" autocomplete="off" placeholder="optional">
     <div class="health" id="keyUse"></div>
+    <label class="toggle"><input type="checkbox" id="scriptMode"><span>Script mode: load everything through script tags, for when an ad blocker or filter blocks ordinary requests</span></label>
     <button class="btn wide" id="testConn">Test the connection</button>
     <div id="connTest"></div>
     <button class="btn wide" id="testKeys">Test the keys</button>
@@ -1795,7 +1796,9 @@ let STOP = false;
 function timeoutFetch(url, opts, ms){
   const ctl = typeof AbortController!=="undefined" ? new AbortController() : null;
   const t = setTimeout(()=>ctl&&ctl.abort(), ms||8000);
-  return fetch(url, Object.assign({}, opts||{}, ctl?{signal:ctl.signal}:{})).finally(()=>clearTimeout(t));
+  return fetch(url, Object.assign({}, opts||{}, ctl?{signal:ctl.signal}:{}))
+    .then(r=>{ noteFetch(true); return r; }, e=>{ noteFetch(false); throw e; })
+    .finally(()=>clearTimeout(t));
 }
 /* corsproxy.io started demanding its own API key, so it is gone. kinds: text = passes the body
    through, wrap = allorigins' JSON envelope, r2j = feeds only, jina = JSON only. */
@@ -1819,6 +1822,20 @@ const HEDGE_MS = 1800, BENCH_MS = 5*60e3;
    outright. Script tags are still allowed, so in that case everything that offers a JSONP
    callback is loaded that way instead: rss2json for feeds, GDELT for its own API. */
 const FILE_MODE = (typeof location!=="undefined" && location.protocol==="file:");
+/* An ad blocker, strict tracking protection or a network filter can kill fetch() to every relay
+   while leaving script tags alone. After a run of dead fetches with nothing getting through, the
+   page switches itself to script mode rather than sitting there empty. */
+let SCRIPT_MODE = FILE_MODE;
+let fetchDead = 0, fetchAlive = 0;
+function noteFetch(ok){
+  if(ok){ fetchAlive++; fetchDead = 0; return; }
+  fetchDead++;
+  if(!fetchAlive && fetchDead>=6 && !SCRIPT_MODE){
+    SCRIPT_MODE = true;
+    const w = $("fileWarn");
+    if(w) w.innerHTML = '<div class="banner">Nothing could be fetched, which usually means an ad blocker, strict tracking protection or a network filter is blocking the relay sites. The page has switched to script mode, which most blockers leave alone. Keyed APIs and the translator need ordinary requests, so they stay unavailable until you allow this site in the blocker.</div>';
+  }
+}
 async function rssViaJsonp(feedUrl){
   const j = await jsonp("https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent(feedUrl), 12000);
   if(!j || j.status!=="ok") throw new Error("rss2json (script mode): "+((j&&j.message)||"rejected"));
@@ -1868,7 +1885,7 @@ async function relayOnce(st, feedUrl, signal){
 async function relayRss(feedUrl){
   const hit = CACHE.get(feedUrl);
   if(hit && Date.now()-hit.t < CACHE_TTL) return hit.items;
-  if(FILE_MODE){
+  if(SCRIPT_MODE){
     const items = await rssViaJsonp(feedUrl);
     CACHE.set(feedUrl,{t:Date.now(),items});
     return items;
@@ -1985,7 +2002,7 @@ async function pGdelt(q, span){
   const hit = CACHE.get(base);
   if(hit && Date.now()-hit.t < CACHE_TTL) return hit.items;
   let data, errs = [];
-  if(FILE_MODE){
+  if(SCRIPT_MODE){
     const items0 = ((await jsonp(base)).articles||[]).map(a=>({title:(a.title||"").trim(), url:a.url, ms:gdeltDate(a.seendate), source:a.domain||"", srcUrl:a.url, desc:""}));
     CACHE.set(base,{t:Date.now(),items:items0});
     return items0;
@@ -2207,7 +2224,7 @@ async function storeSet(key, val){
    depends on the service's CORS headers, which vary by plan. So: try direct, then every relay,
    and keep whatever the service actually said so the error can be shown rather than swallowed. */
 async function directOrRelayJson(url, label){
-  if(FILE_MODE) throw new Error((label||"this service")+" can't be reached from a downloaded file — it has no script-mode option. Host the page (GitHub Pages) and it will work.");
+  if(SCRIPT_MODE) throw new Error((label||"this service")+" needs ordinary requests, which are blocked here — "+(FILE_MODE?"host the page (GitHub Pages)":"allow this site in your ad blocker or tracking protection")+" and it will work.");
   const errs = [];
   const parse = async (r, kind, name) => {
     let txt = await r.text();
@@ -3344,6 +3361,8 @@ function init(){
   $("useYahoo").addEventListener("change",e=>{ useYahoo=e.target.checked; filtersSave(); });
   $("useLocal").addEventListener("change",e=>{ USE_LOCAL=e.target.checked; filtersSave(); });
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
+  $("scriptMode").checked = SCRIPT_MODE;
+  $("scriptMode").addEventListener("change",e=>{ SCRIPT_MODE = e.target.checked || FILE_MODE; CACHE.clear(); });
   $("testConn").addEventListener("click",async()=>{
     const box = $("connTest"), btn = $("testConn");
     btn.disabled = true; btn.textContent = "Testing…"; box.innerHTML = "";
@@ -3361,16 +3380,26 @@ function init(){
       btn.disabled = false; btn.textContent = "Test the connection";
       return;
     }
-    /* 1. can this page reach anything at all? */
-    try{
+    /* 1. can this page reach anything at all? Several sites at once, because any one of them
+          can be slow, down, or blocked without that meaning the page itself is cut off. */
+    const CHECKS = [
+      ["GDELT","https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"],
+      ["allorigins","https://api.allorigins.win/raw?url="+encodeURIComponent("https://example.com")],
+      ["rss2json","https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent("https://feeds.bbci.co.uk/news/rss.xml")]
+    ];
+    const reached = await Promise.all(CHECKS.map(async ([name,u])=>{
       const t0 = Date.now();
-      const r = await timeoutFetch("https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json");
-      await r.text();
-      line("ok", "The page can reach the internet ("+(Date.now()-t0)+" ms)");
+      try{ await (await timeoutFetch(u, null, 6000)).text(); return name+" "+(Date.now()-t0)+" ms"; }
+      catch(e){ return null; }
+    }));
+    const okOnes = reached.filter(Boolean);
+    if(okOnes.length){
+      line("ok", "The page can reach the internet: "+okOnes.join(", "));
       any = true;
-    }catch(e){
-      line("bad", "No outside requests at all: "+((e&&e.message)||"blocked")+". If this is inside an app preview rather than a browser tab, external requests are blocked there — open the file from GitHub Pages or in Safari.");
+    }else{
+      line("bad", "None of the three test sites answered. That is either no connection, a content blocker or VPN in the way, or a page that is not allowed to make outside requests at all.");
     }
+    line("off", "The relay lines below are what actually matter — a sweep only needs one of them working.");
     /* 2. each relay, one at a time, with a real feed */
     for(const st of RELAY_STATE){
       const {url, kind, name} = RELAYS[st.i](probe);
@@ -3392,7 +3421,18 @@ function init(){
         st.lastOk = Date.now(); st.fails = 0; st.benchedUntil = 0;
       }catch(e){ line("bad", name+": "+((e&&e.message)||"failed")); }
     }
-    if(!any) line("bad", "Nothing got through. Every relay is down or being blocked where this page is running.");
+    if(!any){
+      line("bad", "No ordinary request got through — not one relay, and not the direct check. Relays are never all down at once, so something on this machine or network is blocking them: an ad blocker, strict tracking protection, a VPN or a filtered connection.");
+      try{
+        const t0 = Date.now();
+        const items = await rssViaJsonp(probe);
+        SCRIPT_MODE = true; $("scriptMode").checked = true;
+        line("ok", "Script mode works ("+(Date.now()-t0)+" ms, "+items.length+" items) and has been switched on, so sweeps and scans will run. Keyed APIs and the translator still need ordinary requests.");
+      }catch(e){
+        line("bad", "Script mode failed too: "+((e&&e.message)||"blocked")+". Try another browser, or switch off the blocker for this site.");
+      }
+      line("off", "Quick check: open https://api.allorigins.win/raw?url=https://news.google.com/rss in a new tab. If that page loads but this test fails, a blocker or extension is the cause.");
+    }
     renderHealth();
     btn.disabled = false; btn.textContent = "Test the connection";
   });
