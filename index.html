@@ -293,6 +293,9 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label for="k_gnews">GNews.io · 100/day</label>
     <input id="k_gnews" data-k="gnews" autocomplete="off" placeholder="optional">
     <div class="health" id="keyUse"></div>
+    <label class="lab" for="proxyUrl">Your own proxy (optional)</label>
+    <input id="proxyUrl" class="search" placeholder="https://your-worker.workers.dev/" autocomplete="off">
+    <p class="hint">A Cloudflare Worker you run yourself. Ten lines, free, two minutes to set up, and it removes the relay problem completely: no rate limits, and the keyed APIs and translator work even when the public relays are blocked. Ask me for the worker file.</p>
     <label class="toggle"><input type="checkbox" id="scriptMode"><span>Script mode: load everything through script tags, for when an ad blocker or filter blocks ordinary requests</span></label>
     <button class="btn wide" id="testConn">Test the connection</button>
     <div id="connTest"></div>
@@ -1802,7 +1805,16 @@ function timeoutFetch(url, opts, ms){
 }
 /* corsproxy.io started demanding its own API key, so it is gone. kinds: text = passes the body
    through, wrap = allorigins' JSON envelope, r2j = feeds only, jina = JSON only. */
+/* Slot zero is the proxy you run yourself (a Cloudflare Worker). When it is set it goes first,
+   never rate limits you, and carries the keyed APIs and the translator as well as the feeds. */
+let PROXY_URL = "";
+const PROXY_KEY = "ds-hyperlocal-proxy";
+function proxyUrl(u){
+  if(!PROXY_URL) return "";
+  return PROXY_URL + (PROXY_URL.indexOf("?")>=0 ? (/[?&]$/.test(PROXY_URL)?"":"&") : "?") + "url=" + encodeURIComponent(u);
+}
 const RELAYS = [
+  u => ({url: proxyUrl(u), kind:"text", name:"your proxy", mine:true}),
   u => ({url:"https://api.allorigins.win/raw?url="+encodeURIComponent(u), kind:"text", name:"allorigins"}),
   u => ({url:"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u), kind:"text", name:"codetabs"}),
   u => ({url:"https://api.allorigins.win/get?url="+encodeURIComponent(u), kind:"wrap", name:"allorigins (get)"}),
@@ -1852,6 +1864,7 @@ function relayFree(st){ return st.inflight < RELAY_MAX; }
    never counted against the request's own deadline: a relay that would keep us queueing is passed
    over for this request and tried later. */
 async function relaySlot(st, maxWait){
+  if(RELAYS[st.i]("x").mine) return true;      /* your own proxy: no queue, no gap */
   const t0 = Date.now();
   while(!relayFree(st)){
     if(Date.now()-t0 > (maxWait||4000)) return false;
@@ -1876,7 +1889,10 @@ function relayRelease(st){
 }
 function relayOrder(){
   const now = Date.now();
-  const live = RELAY_STATE.filter(s=>s.benchedUntil<now), benched = RELAY_STATE.filter(s=>s.benchedUntil>=now);
+  const usable = RELAY_STATE.filter(s=>!RELAYS[s.i]("x").mine || PROXY_URL);
+  const mine = usable.filter(s=>RELAYS[s.i]("x").mine && s.benchedUntil<now);
+  if(mine.length) return mine.concat(usable.filter(s=>!RELAYS[s.i]("x").mine && s.benchedUntil<now));
+  const live = usable.filter(s=>s.benchedUntil<now), benched = usable.filter(s=>s.benchedUntil>=now);
   live.sort((a,b)=> (b.lastOk>0)-(a.lastOk>0) || (a.avg||9e9)-(b.avg||9e9) || a.i-b.i);
   if(!live.length) return benched;       /* if everything is benched, try them anyway */
   /* known-good relays take turns, so one of them doesn't absorb every request */
@@ -2285,6 +2301,14 @@ async function storeSet(key, val){
    depends on the service's CORS headers, which vary by plan. So: try direct, then every relay,
    and keep whatever the service actually said so the error can be shown rather than swallowed. */
 async function directOrRelayJson(url, label){
+  if(PROXY_URL){
+    try{
+      const r = await timeoutFetch(proxyUrl(url));
+      const txt = await r.text();
+      try{ return JSON.parse(txt); }
+      catch(e){ throw new Error("your proxy returned "+txt.slice(0,90)); }
+    }catch(e){ if(!SCRIPT_MODE) { /* fall through to the public relays */ } else throw e; }
+  }
   if(SCRIPT_MODE) throw new Error((label||"this service")+" needs ordinary requests, which are blocked here — "+(FILE_MODE?"host the page (GitHub Pages)":"allow this site in your ad blocker or tracking protection")+" and it will work.");
   const errs = [];
   const parse = async (r, kind, name) => {
@@ -3364,7 +3388,9 @@ function renderKeyUse(){
 function relayLine(){
   const now = Date.now();
   return RELAY_STATE.map(st=>{
-    const n = RELAYS[st.i]("x").name;
+    const info = RELAYS[st.i]("x");
+    if(info.mine && !PROXY_URL) return "";
+    const n = info.name;
     const state = st.benchedUntil>now ? "benched" : st.lastOk ? Math.round(st.avg||0)+" ms" : "untried";
     return '<span>'+esc(n)+'</span><span class="st '+(st.benchedUntil>now?"bad":st.lastOk?"ok":"off")+'">'+state+'</span>';
   }).join("");
@@ -3447,6 +3473,15 @@ function init(){
   $("useYahoo").addEventListener("change",e=>{ useYahoo=e.target.checked; filtersSave(); });
   $("useLocal").addEventListener("change",e=>{ USE_LOCAL=e.target.checked; filtersSave(); });
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
+  storeGet(PROXY_KEY,"").then(v=>{ if(v){ PROXY_URL = v; $("proxyUrl").value = v; } });
+  $("proxyUrl").addEventListener("change",e=>{
+    PROXY_URL = e.target.value.trim().replace(/\s+/g,"");
+    storeSet(PROXY_KEY, PROXY_URL);
+    RELAY_STATE[0].benchedUntil = 0; RELAY_STATE[0].fails = 0; RELAY_STATE[0].gap = 0;
+    CACHE.clear();
+    if(PROXY_URL && SCRIPT_MODE && !FILE_MODE){ SCRIPT_MODE = false; $("scriptMode").checked = false; }
+    renderHealth();
+  });
   $("scriptMode").checked = SCRIPT_MODE;
   $("scriptMode").addEventListener("change",e=>{ SCRIPT_MODE = e.target.checked || FILE_MODE; CACHE.clear(); });
   $("testConn").addEventListener("click",async()=>{
@@ -3486,8 +3521,19 @@ function init(){
       line("bad", "None of the three test sites answered. That is either no connection, a content blocker or VPN in the way, or a page that is not allowed to make outside requests at all.");
     }
     line("off", "The relay lines below are what actually matter — a sweep only needs one of them working.");
+    if(PROXY_URL){
+      const t0 = Date.now();
+      try{
+        const r = await timeoutFetch(proxyUrl(probe), null, 9000);
+        const txt = await r.text();
+        if(!/<(rss|feed|item)[\s>]/i.test(txt)) throw new Error(txt.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,90));
+        line("ok", "Your own proxy: working ("+(Date.now()-t0)+" ms). Everything runs through it, including the keyed APIs.");
+        any = true; RELAY_STATE[0].lastOk = Date.now(); RELAY_STATE[0].benchedUntil = 0;
+      }catch(e){ line("bad", "Your own proxy: "+((e&&e.message)||"failed")+" — check the address ends at the worker's root, e.g. https://name.username.workers.dev/"); }
+    }
     /* 2. each relay, one at a time, with a real feed */
     for(const st of RELAY_STATE){
+      if(RELAYS[st.i]("x").mine) continue;
       const {url, kind, name} = RELAYS[st.i](probe);
       if(kind==="jina"){ line("off", name+": skipped (not used for feeds)"); continue; }
       const t0 = Date.now();
