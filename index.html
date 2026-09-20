@@ -1927,9 +1927,9 @@ function relayOrder(forUrl){
   /* one proven relay: put a free one first so we don't queue behind it */
   return live.slice().sort((a,b)=>(relayFree(b)?1:0)-(relayFree(a)?1:0));
 }
-async function relayOnce(st, feedUrl, signal, onStart){
+async function relayOnce(st, feedUrl, signal, onStart, maxWait){
   const {url,kind,name,mine} = RELAYS[st.i](feedUrl);
-  if(!(await relaySlot(st))) throw new Error(name+" is busy, moved on");
+  if(!(await relaySlot(st, maxWait))) throw new Error(name+" is busy, moved on");
   if(onStart) onStart();
   const t0 = Date.now();
   try{
@@ -1980,7 +1980,8 @@ async function relayOnce(st, feedUrl, signal, onStart){
     throw e;
   }finally{ relayRelease(st); }
 }
-async function relayRss(feedUrl){
+/* One pass over the relays; on a timeout the caller retries against only the proven ones. */
+async function relayRss(feedUrl, provenOnly){
   const hit = CACHE.get(feedUrl);
   if(hit && Date.now()-hit.t < CACHE_TTL) return hit.items;
   if(SCRIPT_MODE){
@@ -1988,7 +1989,11 @@ async function relayRss(feedUrl){
     CACHE.set(feedUrl,{t:Date.now(),items});
     return items;
   }
-  const order = relayOrder(feedUrl).filter(st=>RELAYS[st.i]("x").kind!=="jina");
+  let order = relayOrder(feedUrl).filter(st=>RELAYS[st.i]("x").kind!=="jina");
+  if(provenOnly){
+    const good = order.filter(st=>st.lastOk);
+    if(good.length) order = good;
+  }
   const ctls = [], live = new Set();
   const items = await new Promise((resolve,reject)=>{
     let pending = 0, next = 0, done = false, timer = null, lastErr = null, shortTimer = null;
@@ -1996,7 +2001,7 @@ async function relayRss(feedUrl){
     const armDeadline = () => {   /* starts when a relay actually begins fetching, not while queueing */
       if(started) return;
       started = true;
-      deadlineTimer = setTimeout(deadline, PROXY_URL ? 14000 : 6500);
+      deadlineTimer = setTimeout(deadline, provenOnly ? 15000 : (PROXY_URL ? 14000 : 6500));
     };
     const launch = () => {
       if(done || next>=order.length) return;
@@ -2005,7 +2010,10 @@ async function relayRss(feedUrl){
       ctls.push(ctl); pending++; live.add(st);
       clearTimeout(timer);
       timer = setTimeout(launch, HEDGE_MS);
-      relayOnce(st, feedUrl, ctl && ctl.signal, armDeadline).finally(()=>live.delete(st)).then(r=>{
+      /* if this is the only relay still answering, wait for it rather than giving up on it */
+      const proven = order.filter(s=>s.lastOk).length;
+      const wait = (provenOnly || proven<=1) ? 12000 : 4000;
+      relayOnce(st, feedUrl, ctl && ctl.signal, armDeadline, wait).finally(()=>live.delete(st)).then(r=>{
         if(done) return; done = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(shortTimer); resolve(r);
       }, e=>{
         /* prefer an error that says what actually came back over a bare network failure */
@@ -2029,10 +2037,22 @@ async function relayRss(feedUrl){
       reject(new Error("relays timed out"));
     };
     /* a backstop in case every relay is busy and nothing ever starts */
-    setTimeout(()=>{ if(!started) deadline(); }, 15000);
+    setTimeout(()=>{ if(!started) deadline(); }, 25000);
   }).finally(()=>ctls.forEach(c=>{ try{ c && c.abort(); }catch(e){} }));
   CACHE.set(feedUrl,{t:Date.now(),items});
   return items;
+}
+/* A timeout usually means we queued behind dead relays rather than that the feed is unreachable,
+   so one more go, aimed only at relays that have actually answered this session. */
+async function fetchFeed(feedUrl){
+  try{
+    return await relayRss(feedUrl);
+  }catch(e){
+    const m = (e&&e.message)||"";
+    if(!/timed out|busy, moved on|all relays failed/i.test(m)) throw e;
+    if(!RELAY_STATE.some(st=>st.lastOk)) throw e;
+    return await relayRss(feedUrl, true);
+  }
 }
 function parseRss(xml){
   const doc = new DOMParser().parseFromString(xml,"text/xml");
@@ -2056,17 +2076,17 @@ function cleanTitle(t, src){
 
 async function pGoogle(q){
   const u = "https://news.google.com/rss/search?q="+encodeURIComponent(q+" when:1d")+"&hl=en-US&gl=US&ceid=US:en";
-  const items = await relayRss(u);
+  const items = await fetchFeed(u);
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
 }
 async function pBing(q){
   const u = "https://www.bing.com/news/search?q="+encodeURIComponent(q)+"&qft=sortbydate%3d%221%22&format=rss&cc=us";
-  const items = await relayRss(u);
+  const items = await fetchFeed(u);
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.link, desc:i.desc}));
 }
 async function pYahoo(q){
   const u = "https://news.search.yahoo.com/rss?p="+encodeURIComponent(q);
-  const items = await relayRss(u);
+  const items = await fetchFeed(u);
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.link, desc:i.desc}));
 }
 function gdeltDate(s){
@@ -2154,7 +2174,7 @@ function feedPathSave(){ storeSet(FEEDPATH_KEY, FEEDPATH); }
 const FEED_PATHS = ["/feed/","/rss","/?feed=rss2","/feeds/rss"];
 async function pGeo(place){
   const u = "https://news.google.com/rss/headlines/section/geo/"+encodeURIComponent(place)+"?hl=en-US&gl=US&ceid=US:en";
-  const items = await relayRss(u);
+  const items = await fetchFeed(u);
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
 }
 async function pStation(call){
@@ -2167,7 +2187,7 @@ async function pStation(call){
   const paths = FEEDPATH[dom] && FEEDPATH[dom].path ? [FEEDPATH[dom].path] : FEED_PATHS.slice(0,1);
   for(const path of paths){
     try{
-      const items = await relayRss("https://"+dom+path);
+      const items = await fetchFeed("https://"+dom+path);
       if(items.length){
         FEEDPATH[dom] = {path, t:Date.now()}; feedPathSave();
         return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:baseCall(call), srcUrl:"https://"+dom, desc:i.desc}));
@@ -2287,12 +2307,12 @@ async function withTranslation(items){
 }
 async function pSpanish(q){
   const u = "https://news.google.com/rss/search?q="+encodeURIComponent(q+" when:1d")+"&hl=es-419&gl=US&ceid=US:es-419";
-  const items = await relayRss(u);
+  const items = await fetchFeed(u);
   return withTranslation(esItems(items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}))));
 }
 async function pSpanishGeo(place){
   const u = "https://news.google.com/rss/headlines/section/geo/"+encodeURIComponent(place)+"?hl=es-419&gl=US&ceid=US:es-419";
-  const items = await relayRss(u);
+  const items = await fetchFeed(u);
   return withTranslation(esItems(items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}))));
 }
 const SPANISH_Q = [
@@ -2562,7 +2582,9 @@ async function sweep(){
   const tasks = [];
   /* if the relays refused us last time, ask for less: six wider searches instead of twelve,
      and Bing only on the first few, since it mostly repeats what Google already has */
-  const light = rateRefusals > 2;
+  /* one working relay can't carry twelve searches plus the local editions, so ask for less */
+  const proven = RELAY_STATE.filter(st=>st.lastOk && st.benchedUntil<Date.now()).length;
+  const light = rateRefusals > 2 || (proven>0 && proven<=1 && !PROXY_URL) || (PROXY_URL && proven===0);
   const qs = light ? SWEEP_LIGHT : SWEEP_FULL;
   rateRefusals = 0;
   /* interleave providers so one slow provider can't hold every worker */
