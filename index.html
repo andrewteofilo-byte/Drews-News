@@ -1841,19 +1841,45 @@ async function rssViaJsonp(feedUrl){
   if(!j || j.status!=="ok") throw new Error("rss2json (script mode): "+((j&&j.message)||"rejected"));
   return (j.items||[]).map(it=>({title:it.title||"", link:it.link||"", date:it.pubDate?Date.parse(it.pubDate.replace(" ","T")+"Z"):0, src:it.author||"", desc:it.description||""}));
 }
-const RELAY_STATE = RELAYS.map((r,i)=>({i, fails:0, benchedUntil:0, lastOk:0, avg:0}));
+const RELAY_STATE = RELAYS.map((r,i)=>({i, fails:0, benchedUntil:0, lastOk:0, avg:0, inflight:0, lastStart:0, waiters:[]}));
+/* Relays rate-limit per IP, so the first request succeeds and the rush behind it gets refused.
+   Each relay takes at most two at a time with a gap between them, and work is spread across all
+   of them rather than piled onto whichever answered last. */
+const RELAY_MAX = 2, RELAY_GAP = 400, RELAY_GAP_MAX = 6000;
+let relayTurn = 0;
+function relayFree(st){ return st.inflight < RELAY_MAX; }
+async function relaySlot(st){
+  while(!relayFree(st)) await new Promise(r=>st.waiters.push(r));
+  const gap = st.gap || RELAY_GAP;
+  const since = Date.now()-st.lastStart;
+  if(since < gap) await new Promise(r=>setTimeout(r, gap-since));
+  st.inflight++; st.lastStart = Date.now();
+}
+function relayRelease(st){
+  st.inflight--;
+  const w = st.waiters.shift(); if(w) w();
+}
 function relayOrder(){
   const now = Date.now();
   const live = RELAY_STATE.filter(s=>s.benchedUntil<now), benched = RELAY_STATE.filter(s=>s.benchedUntil>=now);
   live.sort((a,b)=> (b.lastOk>0)-(a.lastOk>0) || (a.avg||9e9)-(b.avg||9e9) || a.i-b.i);
-  return live.length ? live : benched;   /* if everything is benched, try them anyway */
+  if(!live.length) return benched;       /* if everything is benched, try them anyway */
+  /* known-good relays take turns, so one of them doesn't absorb every request */
+  const good = live.filter(st=>st.lastOk), rest = live.filter(st=>!st.lastOk);
+  if(good.length>1){
+    const n = relayTurn++ % good.length;
+    return good.slice(n).concat(good.slice(0,n), rest);
+  }
+  /* one proven relay: put a free one first so we don't queue behind it */
+  return live.slice().sort((a,b)=>(relayFree(b)?1:0)-(relayFree(a)?1:0));
 }
 async function relayOnce(st, feedUrl, signal){
   const {url,kind,name} = RELAYS[st.i](feedUrl);
+  await relaySlot(st);
   const t0 = Date.now();
   try{
     const res = await fetch(url, {signal});
-    if(!res.ok) throw new Error("HTTP "+res.status);
+    if(!res.ok) throw new Error(name+" HTTP "+res.status+(res.status===429?" (rate limited)":""));
     let items;
     if(kind==="r2j"){
       const j = await res.json();
@@ -1873,14 +1899,24 @@ async function relayOnce(st, feedUrl, signal){
     }
     const ms = Date.now()-t0;
     st.fails = 0; st.lastOk = Date.now(); st.avg = st.avg ? st.avg*0.7+ms*0.3 : ms;
+    if(st.gap && st.gap > RELAY_GAP) st.gap = Math.max(RELAY_GAP, st.gap*0.8);
     return items;
   }catch(e){
     if(!(signal && signal.aborted)){
-      st.fails++;
-      if(st.fails>=3){ st.benchedUntil = Date.now()+BENCH_MS; st.fails = 0; }
+      const m = (e&&e.message)||"";
+      if(/\b429\b|rate limit|too many requests|quota/i.test(m)){
+        /* refused for going too fast: slow this relay down rather than writing it off */
+        st.gap = Math.min(RELAY_GAP_MAX, (st.gap||RELAY_GAP) * 2);
+        st.benchedUntil = Date.now() + Math.min(20e3, st.gap);
+        st.fails = 0;
+        rateRefusals++;
+      }else{
+        st.fails++;
+        if(st.fails>=3){ st.benchedUntil = Date.now()+BENCH_MS; st.fails = 0; }
+      }
     }
     throw e;
-  }
+  }finally{ relayRelease(st); }
 }
 async function relayRss(feedUrl){
   const hit = CACHE.get(feedUrl);
@@ -2365,7 +2401,15 @@ async function run(name, fn){
     HEALTH[name].fail++; HEALTH[name].last=(e&&e.message)||"failed";
     rs.streak++;
     const keyed = ["newsdata","currents","gnews.io"].includes(name);
-    if(!keyed && rs.streak>=2 && !rs.ok){ rs.skipped = true; HEALTH[name].last = "skipped for this pull: no answer to its first searches"; }
+    const msg = (e&&e.message)||"";
+    const relayFault = /rate limit|too many requests|\b429\b|wants its own key|timed out|all relays failed/i.test(msg);
+    if(relayFault){
+      /* the relays are the problem, not this source: wait a moment and let it try again */
+      await new Promise(r=>setTimeout(r, 1200));
+    }else if(!keyed && rs.streak>=3 && !rs.ok){
+      rs.skipped = true;
+      HEALTH[name].last = "skipped for this pull: three failures with nothing to show";
+    }
     return [];
   }finally{
     rs.inflight--;
@@ -2388,7 +2432,8 @@ async function pool(tasks, n, onTick){
 }
 
 /* ================= SWEEP / SCAN ================= */
-const SWEEP = [
+let rateRefusals = 0;
+const SWEEP_FULL = [
  '"structure fire" OR "house fire" OR "apartment fire" OR "firefighters responded"',
  '"fatal crash" OR "deadly crash" OR "pedestrian struck" OR "rollover crash"',
  '"shooting" police OR "stabbing" OR "homicide investigation"',
@@ -2402,6 +2447,16 @@ const SWEEP = [
  '"helicopter crash" OR "plane crash" OR "mass shooting" OR "death toll"',
  '"people killed" OR "people dead" OR "multiple people" OR "several people" injured'
 ];
+/* the same ground in half the searches, for when the relays are rationing us */
+const SWEEP_LIGHT = [
+ '"structure fire" OR "house fire" OR "apartment fire" OR "firefighters responded" OR "brush fire"',
+ '"fatal crash" OR "deadly crash" OR "pedestrian struck" OR "helicopter crash" OR "plane crash"',
+ '"shooting" police OR "stabbing" OR "mass shooting" OR "officer-involved shooting" OR "homicide investigation"',
+ '"standoff" OR "manhunt" OR "SWAT" OR "barricaded" OR "police chase" OR "shelter in place"',
+ '"Amber Alert" OR "missing child" OR "water rescue" OR "drowning" OR "body recovered"',
+ '"gas leak" OR "explosion" OR "hazmat" OR "evacuated" OR "tornado" OR "flash flooding" OR "death toll"'
+];
+const SWEEP = SWEEP_FULL;
 const GDELT_Q = [
  '("structure fire" OR "house fire" OR "fatal crash" OR "deadly crash" OR shooting OR stabbing OR standoff OR manhunt OR "amber alert" OR "pedestrian struck")',
  '("water rescue" OR drowning OR lockdown OR "bomb threat" OR "gas leak" OR "power outage" OR explosion OR evacuated OR "police chase" OR "flash flooding")'
@@ -2425,10 +2480,15 @@ async function sweep(){
   busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
   const feed = fn => async()=>{ const r = await fn(); ingest(r, null); livePaint(); return []; };
   const tasks = [];
+  /* if the relays refused us last time, ask for less: six wider searches instead of twelve,
+     and Bing only on the first few, since it mostly repeats what Google already has */
+  const light = rateRefusals > 2;
+  const qs = light ? SWEEP_LIGHT : SWEEP_FULL;
+  rateRefusals = 0;
   /* interleave providers so one slow provider can't hold every worker */
-  SWEEP.forEach(q=>tasks.push(feed(()=>run("google",()=>pGoogle(q)))));
-  SWEEP.forEach(q=>tasks.push(feed(()=>run("bing",()=>pBing(q)))));
-  if(useYahoo) SWEEP.forEach(q=>tasks.push(feed(()=>run("yahoo",()=>pYahoo(q)))));
+  qs.forEach(q=>tasks.push(feed(()=>run("google",()=>pGoogle(q)))));
+  qs.slice(0, light ? 3 : qs.length).forEach(q=>tasks.push(feed(()=>run("bing",()=>pBing(q)))));
+  if(useYahoo) qs.forEach(q=>tasks.push(feed(()=>run("yahoo",()=>pYahoo(q)))));
   const k = nextKeyed();
   if(k) tasks.push(feed(()=>run(k[0],()=>k[1](k[2]))));
   if(USE_SPANISH) SPANISH_Q.forEach(q=>tasks.push(feed(()=>run("spanish",()=>pSpanish(q)))));
@@ -2441,8 +2501,9 @@ async function sweep(){
   gd.push(feed(()=>run("gdelt",()=>pGdelt(GDELT_BIG,"24h"))));
   let total = tasks.length + gd.length + 1, done = 0;
   const tick = () => { done++; progress(done,total,"Pulled "+done+" of "+total+" · "+Math.round((Date.now()-pullStart)/1000)+" s · stories appear as they land"); };
+  const lanes = () => Math.max(2, Math.min(8, RELAY_STATE.filter(st=>st.benchedUntil<Date.now()).length * RELAY_MAX));
   await Promise.all([
-    pool(tasks, 8, tick),
+    pool(tasks, lanes(), tick),
     (async()=>{ for(const t of gd){ if(STOP) break; await t(); tick(); } })(),
     loadNational(true).then(()=>{ tick(); livePaint(true); }, ()=>tick())
   ]);
@@ -2616,7 +2677,7 @@ async function deepScan(list){
     return [];
   });
   let marketsDone = 0;
-  await pool(tasks, 6, (n,t)=>{ progress(n,t,"Scanned "+Math.min(marketsDone,list.length)+" of "+list.length+" markets · "+Math.round((Date.now()-pullStart)/1000)+" s"); });
+  await pool(tasks, Math.max(2, Math.min(6, RELAY_STATE.filter(st=>st.benchedUntil<Date.now()).length * RELAY_MAX)), (n,t)=>{ progress(n,t,"Scanned "+Math.min(marketsDone,list.length)+" of "+list.length+" markets · "+Math.round((Date.now()-pullStart)/1000)+" s"); });
   finish();
 }
 
@@ -2649,7 +2710,7 @@ function livePaint(force){
 function finish(){
   busy = false; setBusy(false);
   lastRun = Date.now();
-  progress(1,1, (STOP?"Stopped. ":"Done. ")+"Tap again for fresh results.");
+  progress(1,1, (STOP?"Stopped. ":"Done. ")+"Tap again for fresh results."+(rateRefusals>2?" The relays rationed us, so the next sweep will ask for less.":""));
   STOP = false;
   build();
   STORIES.forEach(x=>x.keys.forEach(k=>SEEN_ALL.add(k)));
