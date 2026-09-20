@@ -278,6 +278,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="fPinned"><span>Only pinned markets</span></label>
     <label class="toggle"><input type="checkbox" id="fUnseen"><span>Only what is new since the last pull</span></label>
     <label class="toggle"><input type="checkbox" id="useYahoo"><span>Also try Yahoo News (blocked more often than not)</span></label>
+    <label class="toggle"><input type="checkbox" id="fastMode"><span>Fast mode: two requests, GDELT plus one Google search, everything slow skipped</span></label>
     <label class="toggle"><input type="checkbox" id="directMode"><span>Direct mode: read the stations' own feeds and the APIs only — no Google, Bing or public relays</span></label>
     <label class="toggle"><input type="checkbox" id="useSpanish" checked><span>Spanish desk: read Univision and Telemundo markets in Spanish and translate</span></label>
     <label class="toggle"><input type="checkbox" id="useLocal" checked><span>On a scan, also read each market's own feeds (local sites and Google's local edition)</span></label>
@@ -2012,7 +2013,7 @@ async function relayRss(feedUrl, provenOnly){
     const armDeadline = () => {   /* starts when a relay actually begins fetching, not while queueing */
       if(started) return;
       started = true;
-      deadlineTimer = setTimeout(deadline, provenOnly ? 15000 : (PROXY_URL ? 14000 : 6500));
+      deadlineTimer = setTimeout(deadline, provenOnly ? 8000 : (PROXY_URL ? 14000 : 6500));
     };
     const launch = () => {
       if(done || next>=order.length) return;
@@ -2052,13 +2053,15 @@ async function relayRss(feedUrl, provenOnly){
       reject(new Error("relays timed out"));
     };
     /* a backstop in case every relay is busy and nothing ever starts */
-    setTimeout(()=>{ if(!started) deadline(); }, 25000);
+    setTimeout(()=>{ if(!started) deadline(); }, 12000);
   }).finally(()=>ctls.forEach(c=>{ try{ c && c.abort(); }catch(e){} }));
   CACHE.set(feedUrl,{t:Date.now(),items});
   return items;
 }
 /* A timeout usually means we queued behind dead relays rather than that the feed is unreachable,
    so one more go, aimed only at relays that have actually answered this session. */
+/* Retries are capped per pull: on a bad night they otherwise double the cost of every failure. */
+let retryBudget = 0;
 async function fetchFeed(feedUrl){
   try{
     return await relayRss(feedUrl);
@@ -2066,7 +2069,9 @@ async function fetchFeed(feedUrl){
     const m = (e&&e.message)||"";
     if(e.definitive) throw e;
     if(!/timed out|busy, moved on|all relays failed/i.test(m)) throw e;
-    if(!RELAY_STATE.some(st=>st.lastOk)) throw e;
+    if(retryBudget <= 0) throw e;
+    if(!RELAY_STATE.some(st=>st.lastOk && st.benchedUntil < Date.now())) throw e;
+    retryBudget--;
     return await relayRss(feedUrl, true);
   }
 }
@@ -2227,12 +2232,12 @@ const OWNER_PATHS = {
   "Morgan":["/feed/","/rss/"],
   "News-Press":["/feed/","/rss/"]
 };
-function pathsFor(call){
+/* Two attempts during a sweep, so a dead site costs little; the feed tester asks for all four. */
+function pathsFor(call, n){
   const owner = DS_OWNERS[baseCall(call)] || "";
   const key = Object.keys(OWNER_PATHS).find(o=>owner.indexOf(o)===0);
   const first = key ? OWNER_PATHS[key] : [];
-  /* owner's paths first, then the common ones, without repeats */
-  return [...new Set(first.concat(FEED_PATHS))].slice(0,4);
+  return [...new Set(first.concat(FEED_PATHS))].slice(0, n||2);
 }
 async function pGeo(place){
   const u = "https://news.google.com/rss/headlines/section/geo/"+encodeURIComponent(place)+"?hl=en-US&gl=US&ceid=US:en";
@@ -2645,6 +2650,7 @@ async function sweep(){
   if(busy) return;
   busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
   const feed = fn => async()=>{ const r = await fn(); ingest(r, null); livePaint(); return []; };
+  if(FAST_MODE) return fastSweep();
   if(DIRECT_MODE) return directSweep();
   const tasks = [];
   /* if the relays refused us last time, ask for less: six wider searches instead of twelve,
@@ -2676,7 +2682,7 @@ async function sweep(){
     (async()=>{ for(const t of gd){ if(STOP) break; await t(); tick(); } })(),
     Promise.race([
       loadNational(true),
-      new Promise(r=>setTimeout(r, 20000))
+      new Promise(r=>setTimeout(r, 10000))
     ]).then(()=>{ tick(); livePaint(true); }, ()=>tick())
   ]);
   finish();
@@ -2847,9 +2853,33 @@ async function directSweep(){
     (async()=>{ for(const t of gd){ if(STOP) break; const r = await t(); ingest(r,null); livePaint(); tick(); } })(),
     Promise.race([
       loadNational(true),
-      new Promise(r=>setTimeout(r, 20000))
+      new Promise(r=>setTimeout(r, 10000))
     ]).then(()=>{ tick(); livePaint(true); }, ()=>tick())
   ]);
+  finish();
+}
+
+/* ================= FAST SWEEP =================
+   Two requests, nothing else. GDELT answers one broad query with up to 250 US articles covering
+   the full 24 hours, and one Google search adds what GDELT's source list misses. The National Desk
+   is read off the same GDELT pull rather than costing another request. Everything slow is skipped:
+   Bing, Yahoo, the local editions, the station feeds, the Spanish desk and the keyed APIs. */
+const FAST_GDELT = '("structure fire" OR "house fire" OR "fatal crash" OR "deadly crash" OR shooting OR stabbing OR standoff OR manhunt OR "amber alert" OR "water rescue" OR drowning OR lockdown OR "bomb threat" OR "gas leak" OR explosion OR evacuated OR "police chase" OR "flash flooding" OR tornado OR "plane crash" OR "helicopter crash" OR "people killed" OR "death toll")';
+const FAST_GOOGLE = '"structure fire" OR "house fire" OR "fatal crash" OR "shooting" OR "standoff" OR "manhunt" OR "Amber Alert" OR "water rescue" OR "gas leak" OR "police chase" OR "tornado warning" OR "helicopter crash"';
+let FAST_MODE = false;
+async function fastSweep(){
+  busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
+  const jobs = [
+    run("gdelt",()=>pGdelt(FAST_GDELT,"24h")).then(r=>{
+      ingest(r, null); livePaint();
+      natFromArticles(r);          /* the national read comes free with this pull */
+      return r;
+    }),
+    run("google",()=>pGoogle(FAST_GOOGLE)).then(r=>{ ingest(r, null); livePaint(); return r; })
+  ];
+  let done = 0;
+  jobs.forEach(j=>j.then(()=>progress(++done, jobs.length, "Pulled "+done+" of "+jobs.length+" · "+Math.round((Date.now()-pullStart)/1000)+" s")));
+  await Promise.all(jobs);
   finish();
 }
 
@@ -2891,7 +2921,7 @@ async function deepScan(list){
 
 function setBusy(on, mode){
   $("sweep").disabled = on && mode!=="sweep";
-  $("sweep").textContent = on && mode==="sweep" ? "Sweeping…" : (DIRECT_MODE ? "Read station feeds" : "Sweep all markets");
+  $("sweep").textContent = on && mode==="sweep" ? "Sweeping…" : (FAST_MODE ? "Fast sweep · 2 requests" : DIRECT_MODE ? "Read station feeds" : "Sweep all markets");
   if(on && mode==="scan"){ $("scanGo").textContent = "Stop"; $("scanGo").disabled = false; }
   if(on && mode==="sweep") $("scanGo").disabled = true;
   $("tally").classList.toggle("on", on);
@@ -2902,6 +2932,7 @@ let lastPaint = 0, pullStart = 0;
 function beginPull(){
   resetRun();
   keyBudget = KEY_BUDGET;
+  retryBudget = 4;
   pullStart = Date.now(); lastPaint = 0;
   SEEN_PRIOR = new Set(SEEN_ALL);
 }
@@ -3091,7 +3122,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -3371,6 +3402,41 @@ function natPlaces(t){
   });
   return out.slice(0,4);
 }
+/* score the national picture from articles we already have */
+function natFromArticles(got, src){
+  const rec = {checked:true,t:Date.now(),level:0,tags:[],heads:[],urls:[],src:src||"the same GDELT pull",since:0,nets:[],places:[]};
+  const hits = {};
+  (got||[]).forEach(a=>{
+    const t = a.title||"";
+    if(!a.ms || Date.now()-a.ms > 6*3600e3) return;
+    if(NOT_BREAKING.test(t)) return;
+    const isDeath = DEATH.test(t) && (DEATH_AGE.test(t)||ICON.test(t)||FAMOUS.test(t));
+    NAT_RULES.forEach(([re,lv,label])=>{
+      let ok;
+      if(String(re)==="/__DEATH_ICON__/") ok = isDeath && (ICON.test(t)||LEGEND.test(t));
+      else if(String(re)==="/__DEATH_FAMOUS__/") ok = isDeath && FAMOUS.test(t) && !ICON.test(t) && !LEGEND.test(t);
+      else ok = re.test(t);
+      if(ok && (!hits[label] || hits[label].lv<lv)) hits[label] = {lv, head:t, url:a.url};
+    });
+  });
+  const ranked = Object.keys(hits).sort((a,b)=>hits[b].lv-hits[a].lv);
+  if(ranked.length){
+    rec.level = hits[ranked[0]].lv;
+    rec.tags = ranked.slice(0,3);
+    rec.heads = rec.tags.map(k=>hits[k].head);
+    rec.urls = rec.tags.map(k=>hits[k].url);
+    const key = normKey(rec.heads[0]).slice(0,50);
+    if(!natHistory[key]) natHistory[key] = Date.now();
+    rec.since = natHistory[key];
+    const netHit = {};
+    rec.heads.forEach(hd=>NET_TIES.forEach(([re,n])=>{ if(re.test(hd)) netHit[n]=1; }));
+    rec.nets = Object.keys(netHit);
+    rec.places = natPlaces(rec.heads.join(" "));
+  }
+  natState = rec;
+  renderNat();
+  return rec;
+}
 async function loadNational(force){
   if(!force && natState.t && Date.now()-natState.t < 10*60e3) return natState;
   /* in direct mode the national check goes through GDELT, which your proxy can reach,
@@ -3637,6 +3703,7 @@ function init(){
   $("useLocal").addEventListener("change",e=>{ USE_LOCAL=e.target.checked; filtersSave(); });
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
   $("directMode").addEventListener("change",e=>{ DIRECT_MODE=e.target.checked; filtersSave(); setBusy(false); updateTargets(); });
+  $("fastMode").addEventListener("change",e=>{ FAST_MODE=e.target.checked; filtersSave(); setBusy(false); });
   storeGet(PROXY_KEY,"").then(v=>{ if(v){ PROXY_URL = v; $("proxyUrl").value = v; } });
   storeGet(PROXY_NO_KEY,[]).then(v=>{ (v||[]).forEach(x=>PROXY_NO.add(x)); });
   $("proxyUrl").addEventListener("change",e=>{
@@ -3661,7 +3728,7 @@ function init(){
       const dom = CALL_DOMAIN[baseCall(st.call)];
       if(!dom){ line("off", st.call+": no website on file"); continue; }
       let done = false;
-      for(const path of pathsFor(st.call)){
+      for(const path of pathsFor(st.call, 4)){
         try{
           const items = await fetchFeed("https://"+dom+path);
           if(items.length){
@@ -3895,6 +3962,7 @@ function init(){
     if(typeof f.local==="boolean"){ USE_LOCAL=f.local; $("useLocal").checked=f.local; }
     if(typeof f.spanish==="boolean"){ USE_SPANISH=f.spanish; $("useSpanish").checked=f.spanish; }
     if(typeof f.direct==="boolean"){ DIRECT_MODE=f.direct; $("directMode").checked=f.direct; }
+    if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
     if(f.size && SIZE_TEST[f.size]){ SIZE=f.size; $("size").value=f.size; }
     if(f.sort && SORTS[f.sort]){ SORT=f.sort; $("sort").value=f.sort; }
     if(Array.isArray(f.slots)){
