@@ -2203,18 +2203,27 @@ function feedPathSave(){ storeSet(FEEDPATH_KEY, FEEDPATH); }
 /* newsroom groups build their sites on different platforms, so the likely feed path differs */
 const FEED_PATHS = ["/feed/","/rss/","/arc/outboundfeeds/rss/?outputType=xml","/feeds/syndication/rss/","/?feed=rss2","/rss.xml"];
 const OWNER_PATHS = {
+  /* Gray runs on Arc XP: checked against wbrc.com, a full working feed with timestamps */
+  "Gray":["/arc/outboundfeeds/rss/?outputType=xml","/rss/"],
+  "Graham":["/arc/outboundfeeds/rss/?outputType=xml","/feed/"],
+  /* Sinclair publishes per-section feeds: komonews.com/news/index.rss and the like */
+  "Sinclair":["/news/index.rss","/feed/"],
   "Nexstar":["/feed/","/?feed=rss2"],
-  "Tegna":["/feeds/syndication/rss/","/feed/"],
-  "Gray":["/rss/","/feed/"],
-  "Scripps":["/arc/outboundfeeds/rss/?outputType=xml","/feed/"],
-  "Sinclair":["/feed/","/rss/"],
+  /* Tegna: checked against wthr.com — the section is part of the path */
+  "Tegna":["/feeds/syndication/rss/news","/feeds/syndication/rss/news/local"],
+  /* Scripps: checked against wcpo.com — section feeds end in .rss */
+  "Scripps":["/news.rss","/news/local-news.rss"],
   "Hearst":["/feed/","/rss/"],
   "Fox O&O":["/rss/","/feed/"],
   "CBS O&O":["/latest/rss/","/feed/"],
-  "NBC O&O":["/feed/","/rss/"],
-  "ABC O&O":["/feed/","/rss/"],
+  /* NBCUniversal stations, Telemundo included: checked against nbcdfw.com */
+  "NBC O&O":["/?rss=y","/feed/"],
+  "Telemundo":["/?rss=y","/feed/"],
+  "ABC O&O":["/feed","/rss/"],
   "Allen Media":["/feed/","/rss/"],
-  "Cox":["/feed/","/rss/"]
+  "Cox":["/feed/","/rss/"],
+  "Morgan":["/feed/","/rss/"],
+  "News-Press":["/feed/","/rss/"]
 };
 function pathsFor(call){
   const owner = DS_OWNERS[baseCall(call)] || "";
