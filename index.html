@@ -300,6 +300,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <input id="proxyUrl" class="search" placeholder="https://your-worker.workers.dev/" autocomplete="off">
     <p class="hint">A Cloudflare Worker you run yourself. Ten lines, free, two minutes to set up, and it removes the relay problem completely: no rate limits, and the keyed APIs and translator work even when the public relays are blocked. Ask me for the worker file.</p>
     <label class="toggle"><input type="checkbox" id="scriptMode"><span>Script mode: load everything through script tags, for when an ad blocker or filter blocks ordinary requests</span></label>
+    <button class="btn wide" id="testFeeds">Test station feeds</button>
+    <div id="feedTest"></div>
     <button class="btn wide" id="testConn">Test the connection</button>
     <div id="connTest"></div>
     <button class="btn wide" id="testKeys">Test the keys</button>
@@ -2228,7 +2230,9 @@ const OWNER_PATHS = {
 function pathsFor(call){
   const owner = DS_OWNERS[baseCall(call)] || "";
   const key = Object.keys(OWNER_PATHS).find(o=>owner.indexOf(o)===0);
-  return (key ? OWNER_PATHS[key] : FEED_PATHS).slice(0,2);
+  const first = key ? OWNER_PATHS[key] : [];
+  /* owner's paths first, then the common ones, without repeats */
+  return [...new Set(first.concat(FEED_PATHS))].slice(0,4);
 }
 async function pGeo(place){
   const u = "https://news.google.com/rss/headlines/section/geo/"+encodeURIComponent(place)+"?hl=en-US&gl=US&ceid=US:en";
@@ -3646,6 +3650,36 @@ function init(){
   });
   $("scriptMode").checked = SCRIPT_MODE;
   $("scriptMode").addEventListener("change",e=>{ SCRIPT_MODE = e.target.checked || FILE_MODE; CACHE.clear(); });
+  $("testFeeds").addEventListener("click",async()=>{
+    const box = $("feedTest"), btn = $("testFeeds");
+    btn.disabled = true; btn.textContent = "Testing…"; box.innerHTML = "";
+    const scope = REGION==="ALL" ? DMAS.filter(d=>PINS.has(d.m)) : DMAS.filter(d=>inRegion(d));
+    const d = scope[0] || DMAS.find(x=>x.m==="WICHITA FALLS-LAWTON") || DMAS[0];
+    box.innerHTML = '<div class="ktest off">'+esc(d.m)+'</div>';
+    const line = (cls, txt) => { box.innerHTML += '<div class="ktest '+cls+'">'+esc(txt)+'</div>'; };
+    for(const st of d.all.slice(0,5)){
+      const dom = CALL_DOMAIN[baseCall(st.call)];
+      if(!dom){ line("off", st.call+": no website on file"); continue; }
+      let done = false;
+      for(const path of pathsFor(st.call)){
+        try{
+          const items = await fetchFeed("https://"+dom+path);
+          if(items.length){
+            FEEDPATH[dom] = {path, t:Date.now()}; feedPathSave();
+            const newest = items.map(i=>i.date).filter(Boolean).sort((a,b)=>b-a)[0];
+            line("ok", st.call+" ("+dom+path+"): "+items.length+" items"+(newest?", newest "+ago((Date.now()-newest)/60000):""));
+            done = true; break;
+          }
+          line("off", st.call+" ("+path+"): a feed, but empty");
+        }catch(e){
+          line("bad", st.call+" ("+path+"): "+((e&&e.message)||"failed").slice(0,90));
+        }
+      }
+      if(!done){ FEEDPATH[dom] = {path:null, t:Date.now()}; feedPathSave(); }
+    }
+    line("off", "Any site that answered is remembered, so the next direct sweep goes straight to it.");
+    btn.disabled = false; btn.textContent = "Test station feeds";
+  });
   $("testConn").addEventListener("click",async()=>{
     const box = $("connTest"), btn = $("testConn");
     btn.disabled = true; btn.textContent = "Testing…"; box.innerHTML = "";
