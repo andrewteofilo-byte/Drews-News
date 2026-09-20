@@ -1792,7 +1792,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -1809,6 +1809,27 @@ function timeoutFetch(url, opts, ms){
    never rate limits you, and carries the keyed APIs and the translator as well as the feeds. */
 let PROXY_URL = "";
 const PROXY_KEY = "ds-hyperlocal-proxy";
+/* Some sites refuse requests from datacentre addresses, which is where a Worker runs — Google is
+   the main one. When that happens the host is remembered and fetched through the public relays
+   instead, while everything else keeps going through your own proxy. */
+const PROXY_NO = new Set();
+const PROXY_NO_KEY = "ds-hyperlocal-proxy-no";
+function hostOf(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return ""; } }
+function proxyCan(u){
+  if(!PROXY_URL) return false;
+  const hn = hostOf(u);
+  return !([...PROXY_NO].some(bad => hn===bad || hn.endsWith("."+bad)));
+}
+function proxyCannot(u, why){
+  const hn = hostOf(u);
+  if(!hn || PROXY_NO.has(hn)) return;
+  PROXY_NO.add(hn);
+  storeSet(PROXY_NO_KEY, [...PROXY_NO]);
+  HEALTH.proxy = HEALTH.proxy || {ok:0,fail:0,items:0};
+  HEALTH.proxy.last = hn+" won't take requests from a datacentre, so it goes through the public relays";
+  renderHealth();
+}
+const PROXY_BLOCK_TXT = /PROXY_HOST_BLOCKED|sending automated queries|unusual traffic/i;
 function proxyUrl(u){
   if(!PROXY_URL) return "";
   return PROXY_URL + (PROXY_URL.indexOf("?")>=0 ? (/[?&]$/.test(PROXY_URL)?"":"&") : "?") + "url=" + encodeURIComponent(u);
@@ -1887,9 +1908,9 @@ function relayRelease(st){
   st.inflight--;
   const w = st.waiters.shift(); if(w) w();
 }
-function relayOrder(){
+function relayOrder(forUrl){
   const now = Date.now();
-  const usable = RELAY_STATE.filter(s=>!RELAYS[s.i]("x").mine || PROXY_URL);
+  const usable = RELAY_STATE.filter(s=>!RELAYS[s.i]("x").mine || (PROXY_URL && (!forUrl || proxyCan(forUrl))));
   const mine = usable.filter(s=>RELAYS[s.i]("x").mine && s.benchedUntil<now);
   if(mine.length) return mine.concat(usable.filter(s=>!RELAYS[s.i]("x").mine && s.benchedUntil<now));
   const live = usable.filter(s=>s.benchedUntil<now), benched = usable.filter(s=>s.benchedUntil>=now);
@@ -1919,6 +1940,10 @@ async function relayOnce(st, feedUrl, signal, onStart){
       items = (j.items||[]).map(it=>({title:it.title||"", link:it.link||"", date:it.pubDate?Date.parse(it.pubDate.replace(" ","T")+"Z"):0, src:it.author||"", desc:it.description||""}));
     }else{
       let xml = await res.text();
+      if(RELAYS[st.i]("x").mine && (res.status===451 || PROXY_BLOCK_TXT.test(xml.slice(0,300)))){
+        proxyCannot(feedUrl);
+        throw new Error("your proxy: "+hostOf(feedUrl)+" blocks datacentre requests, using a public relay");
+      }
       if(kind==="wrap"){
         try{ xml = (JSON.parse(xml)||{}).contents||""; }catch(e){ throw new Error(name+" returned "+xml.slice(0,60)); }
       }
@@ -1958,7 +1983,7 @@ async function relayRss(feedUrl){
     CACHE.set(feedUrl,{t:Date.now(),items});
     return items;
   }
-  const order = relayOrder().filter(st=>RELAYS[st.i]("x").kind!=="jina");
+  const order = relayOrder(feedUrl).filter(st=>RELAYS[st.i]("x").kind!=="jina");
   const ctls = [], live = new Set();
   const items = await new Promise((resolve,reject)=>{
     let pending = 0, next = 0, done = false, timer = null, lastErr = null, shortTimer = null;
@@ -2089,7 +2114,7 @@ async function pGdelt(q, span){
   }catch(e){
     errs.push((e&&e.message)||"direct failed");
     if(/GDELT says/.test(errs[0])) throw e;            /* GDELT itself objected: relays won't help */
-    for(const st of relayOrder()){
+    for(const st of relayOrder(base)){
       const {url:ru, kind, name} = RELAYS[st.i](base+"&format=json");
       if(kind==="r2j") continue;
       try{
@@ -2301,13 +2326,14 @@ async function storeSet(key, val){
    depends on the service's CORS headers, which vary by plan. So: try direct, then every relay,
    and keep whatever the service actually said so the error can be shown rather than swallowed. */
 async function directOrRelayJson(url, label){
-  if(PROXY_URL){
+  if(proxyCan(url)){
     try{
       const r = await timeoutFetch(proxyUrl(url));
       const txt = await r.text();
+      if(r.status===451 || PROXY_BLOCK_TXT.test(txt.slice(0,300))){ proxyCannot(url); throw new Error("host blocks datacentre requests"); }
       try{ return JSON.parse(txt); }
       catch(e){ throw new Error("your proxy returned "+txt.slice(0,90)); }
-    }catch(e){ if(!SCRIPT_MODE) { /* fall through to the public relays */ } else throw e; }
+    }catch(e){ if(SCRIPT_MODE) throw e; /* otherwise fall through to the public relays */ }
   }
   if(SCRIPT_MODE) throw new Error((label||"this service")+" needs ordinary requests, which are blocked here — "+(FILE_MODE?"host the page (GitHub Pages)":"allow this site in your ad blocker or tracking protection")+" and it will work.");
   const errs = [];
@@ -2328,9 +2354,9 @@ async function directOrRelayJson(url, label){
   };
   try{ return await parse(await timeoutFetch(url)); }
   catch(e){ errs.push("direct: "+(e&&e.message||e)); }
-  for(const st of relayOrder()){
+  for(const st of relayOrder(url)){
     const {url:ru, kind, name} = RELAYS[st.i](url);
-    if(kind==="r2j") continue;            /* feed-only relay */
+    if(kind==="r2j" || RELAYS[st.i]("x").mine) continue;   /* feed-only relay, and yours was tried above */
     try{
       const j = await parse(await timeoutFetch(ru), kind, name);
       st.lastOk = Date.now(); st.fails = 0;
@@ -3474,10 +3500,12 @@ function init(){
   $("useLocal").addEventListener("change",e=>{ USE_LOCAL=e.target.checked; filtersSave(); });
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
   storeGet(PROXY_KEY,"").then(v=>{ if(v){ PROXY_URL = v; $("proxyUrl").value = v; } });
+  storeGet(PROXY_NO_KEY,[]).then(v=>{ (v||[]).forEach(x=>PROXY_NO.add(x)); });
   $("proxyUrl").addEventListener("change",e=>{
     PROXY_URL = e.target.value.trim().replace(/\s+/g,"");
     storeSet(PROXY_KEY, PROXY_URL);
     RELAY_STATE[0].benchedUntil = 0; RELAY_STATE[0].fails = 0; RELAY_STATE[0].gap = 0;
+    PROXY_NO.clear(); storeSet(PROXY_NO_KEY, []);
     CACHE.clear();
     if(PROXY_URL && SCRIPT_MODE && !FILE_MODE){ SCRIPT_MODE = false; $("scriptMode").checked = false; }
     renderHealth();
@@ -3527,9 +3555,25 @@ function init(){
         const r = await timeoutFetch(proxyUrl(probe), null, 9000);
         const txt = await r.text();
         if(!/<(rss|feed|item)[\s>]/i.test(txt)) throw new Error(txt.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,90));
-        line("ok", "Your own proxy: working ("+(Date.now()-t0)+" ms). Everything runs through it, including the keyed APIs.");
+        line("ok", "Your own proxy: working ("+(Date.now()-t0)+" ms) for Google. Everything runs through it, including the keyed APIs.");
         any = true; RELAY_STATE[0].lastOk = Date.now(); RELAY_STATE[0].benchedUntil = 0;
-      }catch(e){ line("bad", "Your own proxy: "+((e&&e.message)||"failed")+" — check the address ends at the worker's root, e.g. https://name.username.workers.dev/"); }
+      }catch(e){
+        const m = (e&&e.message)||"failed";
+        if(PROXY_BLOCK_TXT.test(m) || /blocks datacentre/.test(m)){
+          proxyCannot(probe);
+          line("off", "Your own proxy: Google refuses requests from datacentres, so Google feeds will use the public relays. Everything else — Bing, GDELT, station sites, the keyed APIs and the translator — still goes through your proxy. Checking it on one of those:");
+          try{
+            const t1 = Date.now();
+            const r2 = await timeoutFetch(proxyUrl("https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"), null, 9000);
+            const txt2 = await r2.text();
+            JSON.parse(txt2);
+            line("ok", "Your own proxy: working ("+(Date.now()-t1)+" ms) on everything except Google."); any = true;
+            RELAY_STATE[0].lastOk = Date.now(); RELAY_STATE[0].benchedUntil = 0;
+          }catch(e2){ line("bad", "Your own proxy failed on GDELT too: "+((e2&&e2.message)||"failed")); }
+        }else{
+          line("bad", "Your own proxy: "+m+" — check the address ends at the worker's root, e.g. https://name.username.workers.dev/");
+        }
+      }
     }
     /* 2. each relay, one at a time, with a real feed */
     for(const st of RELAY_STATE){
