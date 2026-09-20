@@ -2244,6 +2244,80 @@ async function pGeo(place){
   const items = await fetchFeed(u);
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
 }
+/* ================= BATCHED STATION READS =================
+   With your own proxy, all the station feeds for a sweep go out as one request: the worker fetches
+   them in parallel from Cloudflare's side and sends back one response, with article bodies stripped.
+   If the worker predates the batch endpoint, this falls back to reading them one at a time. */
+let BATCH_OK = true;
+function stationUrl(call){
+  const dom = CALL_DOMAIN[baseCall(call)];
+  if(!dom) return null;
+  const known = FEEDPATH[dom];
+  if(known && known.path===null && Date.now()-known.t < 24*3600e3) return null;
+  const path = (known && known.path) || pathsFor(call)[0];
+  return "https://"+dom+path;
+}
+async function proxyBatch(urls){
+  const base = PROXY_URL.replace(/\/+$/,"") + "/batch?trim=1&" + urls.map(u=>"u="+encodeURIComponent(u)).join("&");
+  const r = await timeoutFetch(base, null, 20000);
+  const txt = await r.text();
+  let j;
+  try{ j = JSON.parse(txt); }
+  catch(e){ throw new Error("batch not supported by this worker: "+txt.slice(0,60)); }
+  if(!j.results) throw new Error(j.error || "batch returned nothing");
+  return j.results;
+}
+/* read one station per market for a list of markets, in a single request where possible */
+async function readStations(list, perMarket){
+  const want = [];
+  list.forEach(d=>feedStations(d, perMarket||1).forEach(st=>{
+    const u = stationUrl(st.call);
+    if(u) want.push({d, st, url:u});
+  }));
+  if(!want.length) return 0;
+  if(PROXY_URL && BATCH_OK && want.length>1){
+    try{
+      let got = 0;
+      for(let i=0;i<want.length;i+=25){
+        const slice = want.slice(i,i+25);
+        const results = await proxyBatch(slice.map(x=>x.url));   /* called directly, so a failure reaches the catch below */
+        HEALTH.station.ok++; HEALTH.station.last = "ok";
+        results.forEach(res=>{
+          const job = slice.find(x=>x.url===res.url);
+          if(!job) return;
+          const dom = hostOf(res.url);
+          if(!res.ok || !res.body || !/<(rss|feed|item)[\s>]/i.test(res.body)){
+            FEEDPATH[dom] = {path:null, t:Date.now()};
+            return;
+          }
+          FEEDPATH[dom] = {path: res.url.slice(("https://"+dom).length), t:Date.now()};
+          const items = parseRss(res.body).map(it=>({
+            title:cleanTitle(it.title,it.src), url:it.link, ms:it.date,
+            source:baseCall(job.st.call), srcUrl:"https://"+dom, desc:it.desc, prov:"station"
+          }));
+          ingest(items, [job.d.id]);
+          got += items.length;
+        });
+        feedPathSave(); livePaint();
+      }
+      HEALTH.station.items += got;
+      return got;
+    }catch(e){
+      BATCH_OK = false;
+      HEALTH.station.fail++;
+      HEALTH.station.last = "batch unavailable, reading one at a time: "+((e&&e.message)||"").slice(0,80);
+      renderHealth();
+    }
+  }
+  /* one at a time */
+  let got = 0;
+  await Promise.all(want.map(async job=>{
+    const r = await run("station",()=>pStation(job.st.call));
+    ingest(r, [job.d.id]); got += r.length; livePaint();
+  }));
+  return got;
+}
+
 async function pStation(call){
   const dom = CALL_DOMAIN[baseCall(call)];
   if(!dom) return [];
@@ -2837,12 +2911,16 @@ function directScope(){
 async function directSweep(){
   const list = directScope();
   const tasks = [];
-  list.forEach(d=>{
-    feedStations(d, 2).forEach(st=>tasks.push(async()=>{
-      const r = await run("station",()=>pStation(st.call));
-      ingest(r, [d.id]); livePaint(); return [];
-    }));
-  });
+  if(PROXY_URL && BATCH_OK){
+    tasks.push(async()=>{ await readStations(list, 2); return []; });
+  }else{
+    list.forEach(d=>{
+      feedStations(d, 2).forEach(st=>tasks.push(async()=>{
+        const r = await run("station",()=>pStation(st.call));
+        ingest(r, [d.id]); livePaint(); return [];
+      }));
+    });
+  }
   const k = nextKeyed();
   if(k) tasks.push(async()=>{ const r = await run(k[0],()=>k[1](k[2])); ingest(r,null); livePaint(); return []; });
   const gd = [()=>run("gdelt",()=>pGdelt(GDELT_Q[0],"3h")), ()=>run("gdelt",()=>pGdelt(GDELT_BIG,"24h"))];
@@ -2881,10 +2959,8 @@ async function fastSweep(){
   const scope = pool.slice().sort((a,b)=>rank(a)-rank(b) || a.rank-b.rank).slice(0, FAST_STATIONS);
   const skipped = pool.length - scope.length;
   const jobs = [];
-  /* one station site per market keeps it quick; the second is picked up by a full or direct sweep */
-  scope.forEach(d=>feedStations(d, 1).forEach(st=>{
-    jobs.push(run("station",()=>pStation(st.call)).then(r=>{ ingest(r,[d.id]); livePaint(); }));
-  }));
+  /* one station site per market, all of them in a single request through your proxy */
+  jobs.push(readStations(scope, 1));
   jobs.push(run("google",()=>pGoogle(FAST_GOOGLE)).then(r=>{
     ingest(r, null); livePaint();
     natFromArticles(r, "the same Google pull");   /* the national read costs no extra request */
@@ -3726,7 +3802,7 @@ function init(){
     PROXY_URL = e.target.value.trim().replace(/\s+/g,"");
     storeSet(PROXY_KEY, PROXY_URL);
     RELAY_STATE[0].benchedUntil = 0; RELAY_STATE[0].fails = 0; RELAY_STATE[0].gap = 0;
-    PROXY_NO.clear(); storeSet(PROXY_NO_KEY, []);
+    PROXY_NO.clear(); storeSet(PROXY_NO_KEY, []); BATCH_OK = true;
     CACHE.clear();
     if(PROXY_URL && SCRIPT_MODE && !FILE_MODE){ SCRIPT_MODE = false; $("scriptMode").checked = false; }
     renderHealth();
