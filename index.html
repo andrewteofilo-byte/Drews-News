@@ -292,6 +292,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <input id="k_currents" data-k="currents" autocomplete="off" placeholder="optional">
     <label for="k_gnews">GNews.io · 100/day</label>
     <input id="k_gnews" data-k="gnews" autocomplete="off" placeholder="optional">
+    <label for="k_rss2json">rss2json · free key lifts the feed limit</label>
+    <input id="k_rss2json" data-k="rss2json" autocomplete="off" placeholder="optional, from rss2json.com">
     <div class="health" id="keyUse"></div>
     <label class="lab" for="proxyUrl">Your own proxy (optional)</label>
     <input id="proxyUrl" class="search" placeholder="https://your-worker.workers.dev/" autocomplete="off">
@@ -1839,7 +1841,7 @@ const RELAYS = [
   u => ({url:"https://api.allorigins.win/raw?url="+encodeURIComponent(u), kind:"text", name:"allorigins"}),
   u => ({url:"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u), kind:"text", name:"codetabs"}),
   u => ({url:"https://api.allorigins.win/get?url="+encodeURIComponent(u), kind:"wrap", name:"allorigins (get)"}),
-  u => ({url:"https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent(u), kind:"r2j", name:"rss2json"}),
+  u => ({url:"https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent(u)+(NEWS_KEYS.rss2json?"&api_key="+encodeURIComponent(NEWS_KEYS.rss2json)+"&count=40":""), kind:"r2j", name:"rss2json"}),
   u => ({url:"https://test.cors.workers.dev/?"+u, kind:"text", name:"cors.workers"}),
   u => ({url:"https://api.cors.lol/?url="+encodeURIComponent(u), kind:"text", name:"cors.lol"}),
   u => ({url:"https://thingproxy.freeboard.io/fetch/"+u, kind:"text", name:"thingproxy"}),
@@ -1870,7 +1872,7 @@ function noteFetch(ok){
   }
 }
 async function rssViaJsonp(feedUrl){
-  const j = await jsonp("https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent(feedUrl), 12000);
+  const j = await jsonp("https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent(feedUrl)+(NEWS_KEYS.rss2json?"&api_key="+encodeURIComponent(NEWS_KEYS.rss2json)+"&count=40":""), 12000);
   if(!j || j.status!=="ok") throw new Error("rss2json (script mode): "+((j&&j.message)||"rejected"));
   return (j.items||[]).map(it=>({title:it.title||"", link:it.link||"", date:it.pubDate?Date.parse(it.pubDate.replace(" ","T")+"Z"):0, src:it.author||"", desc:it.description||""}));
 }
@@ -1926,17 +1928,20 @@ function relayOrder(forUrl){
   return live.slice().sort((a,b)=>(relayFree(b)?1:0)-(relayFree(a)?1:0));
 }
 async function relayOnce(st, feedUrl, signal, onStart){
-  const {url,kind,name} = RELAYS[st.i](feedUrl);
+  const {url,kind,name,mine} = RELAYS[st.i](feedUrl);
   if(!(await relaySlot(st))) throw new Error(name+" is busy, moved on");
   if(onStart) onStart();
   const t0 = Date.now();
   try{
     const res = await fetch(url, {signal});
-    if(!res.ok) throw new Error(name+" HTTP "+res.status+(res.status===429?" (rate limited)":""));
+    if(!res.ok && !(mine && res.status===451)) throw new Error(name+" HTTP "+res.status+(res.status===429?" (rate limited)":""));
     let items;
     if(kind==="r2j"){
       const j = await res.json();
-      if(j.status!=="ok") throw new Error("rss2json "+(j.message||"error"));
+      if(j.status!=="ok"){
+        const m = j.message||"error";
+        throw new Error(/api key/i.test(m) ? "rss2json needs a free API key (add it under the key fields)" : "rss2json "+m);
+      }
       items = (j.items||[]).map(it=>({title:it.title||"", link:it.link||"", date:it.pubDate?Date.parse(it.pubDate.replace(" ","T")+"Z"):0, src:it.author||"", desc:it.description||""}));
     }else{
       let xml = await res.text();
@@ -1991,7 +1996,7 @@ async function relayRss(feedUrl){
     const armDeadline = () => {   /* starts when a relay actually begins fetching, not while queueing */
       if(started) return;
       started = true;
-      deadlineTimer = setTimeout(deadline, 6500);
+      deadlineTimer = setTimeout(deadline, PROXY_URL ? 14000 : 6500);
     };
     const launch = () => {
       if(done || next>=order.length) return;
@@ -2328,7 +2333,7 @@ async function storeSet(key, val){
 async function directOrRelayJson(url, label){
   if(proxyCan(url)){
     try{
-      const r = await timeoutFetch(proxyUrl(url));
+      const r = await timeoutFetch(proxyUrl(url), null, 14000);
       const txt = await r.text();
       if(r.status===451 || PROXY_BLOCK_TXT.test(txt.slice(0,300))){ proxyCannot(url); throw new Error("host blocks datacentre requests"); }
       try{ return JSON.parse(txt); }
@@ -3550,9 +3555,18 @@ function init(){
     }
     line("off", "The relay lines below are what actually matter — a sweep only needs one of them working.");
     if(PROXY_URL){
+      /* the worker's own root answers instantly, which separates "worker is down" from "that site is slow" */
+      try{
+        const t0 = Date.now();
+        const r0 = await timeoutFetch(PROXY_URL, null, 9000);
+        const txt0 = await r0.text();
+        if(/Drew|url=/.test(txt0)) line("ok", "Your worker is up and running your code ("+(Date.now()-t0)+" ms).");
+        else if(/Hello World/i.test(txt0)) line("bad", "Your worker is up but still has Cloudflare's starter code. Paste worker.js over it and Deploy.");
+        else line("off", "Your worker answered but with something unexpected: "+txt0.replace(/\s+/g," ").slice(0,80));
+      }catch(e){ line("bad", "Your worker didn't answer at all: "+((e&&e.message)||"blocked")+". If the address opens in a browser tab, then this network is blocking the page's requests to it."); }
       const t0 = Date.now();
       try{
-        const r = await timeoutFetch(proxyUrl(probe), null, 9000);
+        const r = await timeoutFetch(proxyUrl(probe), null, 14000);
         const txt = await r.text();
         if(!/<(rss|feed|item)[\s>]/i.test(txt)) throw new Error(txt.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,90));
         line("ok", "Your own proxy: working ("+(Date.now()-t0)+" ms) for Google. Everything runs through it, including the keyed APIs.");
@@ -3564,12 +3578,12 @@ function init(){
           line("off", "Your own proxy: Google refuses requests from datacentres, so Google feeds will use the public relays. Everything else — Bing, GDELT, station sites, the keyed APIs and the translator — still goes through your proxy. Checking it on one of those:");
           try{
             const t1 = Date.now();
-            const r2 = await timeoutFetch(proxyUrl("https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"), null, 9000);
+            const r2 = await timeoutFetch(proxyUrl("https://www.bing.com/news/search?q=test&format=rss"), null, 14000);
             const txt2 = await r2.text();
-            JSON.parse(txt2);
+            if(!/<(rss|feed|item)[\s>]/i.test(txt2)) throw new Error(txt2.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,80));
             line("ok", "Your own proxy: working ("+(Date.now()-t1)+" ms) on everything except Google."); any = true;
             RELAY_STATE[0].lastOk = Date.now(); RELAY_STATE[0].benchedUntil = 0;
-          }catch(e2){ line("bad", "Your own proxy failed on GDELT too: "+((e2&&e2.message)||"failed")); }
+          }catch(e2){ line("bad", "Your own proxy failed on Bing as well: "+((e2&&e2.message)||"failed")); }
         }else{
           line("bad", "Your own proxy: "+m+" — check the address ends at the worker's root, e.g. https://name.username.workers.dev/");
         }
@@ -3586,7 +3600,10 @@ function init(){
         if(kind==="wrap") txt = (JSON.parse(txt)||{}).contents||"";
         if(kind==="r2j"){
           const j = JSON.parse(txt);
-          if(j.status!=="ok") throw new Error(j.message||"rejected");
+          if(j.status!=="ok"){
+            const m = j.message||"rejected";
+            throw new Error(/api key/i.test(m) ? "needs a free API key from rss2json.com — add it under the key fields" : m);
+          }
           line("ok", name+": working ("+(Date.now()-t0)+" ms, "+(j.items||[]).length+" items)"); any = true; continue;
         }
         if(!/<(rss|feed|item)[\s>]/i.test(txt)){
@@ -3730,7 +3747,7 @@ function init(){
   });
   keyUseLoad(); feedPathLoad();
   keysLoad().then(()=>{
-    ["newsdata","currents","gnews"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
+    ["newsdata","currents","gnews","rss2json"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
     renderHealth();
   });
   if(FILE_MODE) $("fileWarn").innerHTML = '<div class="banner">This page is open as a downloaded file, so the browser blocks its normal network requests. It has switched to script mode, which still gets Google News, Bing, the local editions, the station feeds and GDELT through rss2json. Not available in this mode: the three keyed APIs and the Spanish translator, which fall back to the newsroom glossary. Putting the file on GitHub Pages restores everything.</div>';
