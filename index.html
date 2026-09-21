@@ -3002,6 +3002,8 @@ async function surveyFeeds(onProgress){
   /* whatever guessing didn't find, ask the sites themselves */
   const left = DMAS.filter(d=>!FEEDMAP[d.m]);
   if(left.length) await discoverFeeds(left, msg=>onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length, msg));
+  const stillLeft = DMAS.filter(d=>!FEEDMAP[d.m]);
+  if(stillLeft.length) await rescueViaRss2json(stillLeft, msg=>onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length, msg));
   feedMapSave(); feedPathSave();
   return Object.keys(FEEDMAP).length;
 }
@@ -3058,12 +3060,47 @@ async function discoverFeeds(markets, onProgress){
     onProgress && onProgress("testing advertised feeds");
   }
 }
+/* Some newsrooms (Sinclair and Tegna look like it) refuse requests from datacentres, which is where
+   your worker runs. rss2json fetches from its own servers instead, so markets the worker couldn't
+   reach get one more try that way, and whatever works is remembered as "via rss2json". */
+async function viaRss2json(url){
+  const api = "https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent(url)+(NEWS_KEYS.rss2json?"&api_key="+encodeURIComponent(NEWS_KEYS.rss2json)+"&count=30":"");
+  let j;
+  if(SCRIPT_MODE) j = await jsonp(api, 12000);
+  else{
+    const r = await timeoutFetch(api, null, 12000);
+    j = await r.json();
+  }
+  if(!j || j.status!=="ok") throw new Error((j&&j.message)||"rss2json refused");
+  return (j.items||[]).map(it=>({title:it.title||"", link:it.link||"", date:it.pubDate?Date.parse(it.pubDate.replace(" ","T")+"Z"):0, src:it.author||"", desc:it.description||""}));
+}
+async function rescueViaRss2json(markets, onProgress){
+  let n = 0;
+  for(const d of markets){
+    if(FEEDMAP[d.m]) continue;
+    const tries = [];
+    d.all.forEach(st=>{
+      const dom = CALL_DOMAIN[baseCall(st.call)];
+      if(!dom) return;
+      pathsFor(st.call, 3).forEach(path=>tries.push({call:st.call, url:"https://"+dom+path}));
+    });
+    /* at most six tries a market, so an rss2json key's daily allowance isn't wasted */
+    for(const t of [...new Map(tries.map(x=>[x.url,x])).values()].slice(0,6)){
+      try{
+        const items = await viaRss2json(t.url);
+        if(items.length){ FEEDMAP[d.m] = {call:t.call, url:t.url, t:Date.now(), how:"rss2json", via:"rss2json"}; n++; break; }
+      }catch(e){ if(/api key|very short period/i.test((e&&e.message)||"")) return n; }
+    }
+    onProgress && onProgress("trying rss2json for "+d.m);
+  }
+  return n;
+}
 function renderFeedCoverage(){
   const box = $("feedCover"); if(!box) return;
   const have = DMAS.filter(d=>FEEDMAP[d.m]).length;
   const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
   box.innerHTML = have
-    ? '<div class="ktest ok">'+have+' of 210 markets have a proven station feed.</div>'+
+    ? '<div class="ktest ok">'+have+' of 210 markets have a proven station feed'+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length+' reached through rss2json)':'')+'.</div>'+
       (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')
     : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
 }
@@ -3075,7 +3112,8 @@ async function localSweep(){
     progress(0,1,"First run: finding a feed for every market…");
     await surveyFeeds((r,c,n)=>progress(n,210,"Finding feeds · round "+r+" · "+n+" of 210 markets found"));
   }
-  const mapped = DMAS.filter(d=>FEEDMAP[d.m]);
+  const mapped = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via!=="rss2json");
+  const viaR2J = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via==="rss2json");
   const unmapped = DMAS.filter(d=>!FEEDMAP[d.m]);
   const jobs = [];
   for(let i=0;i<mapped.length;i+=25){
@@ -3102,6 +3140,15 @@ async function localSweep(){
       livePaint(); renderHealth();
     })());
   }
+  /* feeds only rss2json can reach */
+  viaR2J.forEach(d=>jobs.push((async()=>{
+    try{
+      const items = await viaRss2json(FEEDMAP[d.m].url);
+      const call = FEEDMAP[d.m].call;
+      ingest(items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:baseCall(call), srcUrl:"https://"+hostOf(FEEDMAP[d.m].url), desc:it.desc||"", prov:"station"})), [d.id]);
+      livePaint();
+    }catch(e){}
+  })()));
   /* markets with no station feed: Google's local edition for the town */
   unmapped.forEach(d=>jobs.push(run("geo",()=>pGeo(d.city+", "+((STATES[d.st]||[""])[0]||d.st))).then(r=>{ ingest(r,[d.id]); livePaint(); })));
   jobs.push(run("google",()=>pGoogle(FAST_GOOGLE)).then(r=>{ ingest(r,null); natFromArticles(r,"the same Google pull"); livePaint(); }));
