@@ -111,6 +111,7 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .relayhead{grid-column:1 / -1;color:var(--dim);font-size:12px;margin-top:8px;border-top:1px solid var(--line);padding-top:6px}
 .eslang{background:#8c7ae6;color:#0f1c2e;font-family:var(--body);font-size:11.5px;font-weight:700;border-radius:3px;padding:1px 5px;vertical-align:middle}
 .esorig{font-size:13px;color:var(--dim);font-style:italic;margin:-2px 0 4px}
+.whybox summary{cursor:pointer;font-size:12.5px;color:var(--dim);margin-top:4px}
 .errline{grid-column:1 / -1;font-size:12px;color:#ff9d97;word-break:break-word;margin:-1px 0 4px}
 .ktest{font-size:12.5px;margin:4px 0;word-break:break-word}
 .ktest.ok{color:var(--nbc)} .ktest.bad{color:#ff9d97} .ktest.off{color:var(--dim)}
@@ -2212,7 +2213,9 @@ let FEEDPATH = {};
 function feedPathLoad(){ return storeGet(FEEDPATH_KEY,{}).then(v=>{ FEEDPATH = v||{}; }); }
 function feedPathSave(){ storeSet(FEEDPATH_KEY, FEEDPATH); }
 /* newsroom groups build their sites on different platforms, so the likely feed path differs */
-const FEED_PATHS = ["/feed/","/rss/","/arc/outboundfeeds/rss/?outputType=xml","/feeds/syndication/rss/","/?feed=rss2","/rss.xml"];
+/* BLOX (TownNews) runs many independent and small-group stations; its feed is a search with f=rss */
+const BLOX_PATH = "/search/?q=&t=article&l=25&s=start_time&sd=desc&f=rss";
+const FEED_PATHS = [BLOX_PATH,"/feed/","/rss/","/arc/outboundfeeds/rss/?outputType=xml","/feeds/syndication/rss/news","/?feed=rss2","/rss.xml"];
 const OWNER_PATHS = {
   /* Gray runs on Arc XP: checked against wbrc.com, a full working feed with timestamps */
   "Gray":["/arc/outboundfeeds/rss/?outputType=xml","/rss/"],
@@ -2231,10 +2234,16 @@ const OWNER_PATHS = {
   "NBC O&O":["/?rss=y","/feed/"],
   "Telemundo":["/?rss=y","/feed/"],
   "ABC O&O":["/feed","/rss/"],
-  "Allen Media":["/feed/","/rss/"],
+  "Allen Media":[BLOX_PATH,"/feed/"],
+  "Cowles":[BLOX_PATH,"/feed/"],
+  "Marquee":[BLOX_PATH,"/feed/"],
+  "Deltavision":[BLOX_PATH,"/feed/"],
+  "Forum":[BLOX_PATH,"/feed/"],
+  "Waterman":[BLOX_PATH,"/feed/"],
+  "Fort Myers":[BLOX_PATH,"/feed/"],
   "Cox":["/feed/","/rss/"],
-  "Morgan":["/feed/","/rss/"],
-  "News-Press":["/feed/","/rss/"]
+  "Morgan":[BLOX_PATH,"/feed/"],
+  "News-Press":[BLOX_PATH,"/feed/"]
 };
 /* Two attempts during a sweep, so a dead site costs little; the feed tester asks for all four. */
 function pathsFor(call, n){
@@ -2948,6 +2957,8 @@ async function directSweep(){
    no station publishes a feed falls back to Google's local edition for that town, so every market
    is covered by something. */
 const FEEDMAP_KEY = "ds-hyperlocal-feedmap";
+const FEEDWHY = {};        /* market -> what the last attempts ran into */
+function why(m, s){ FEEDWHY[m] = FEEDWHY[m] ? (FEEDWHY[m].split(" · ").includes(s) ? FEEDWHY[m] : FEEDWHY[m]+" · "+s) : s; }
 let FEEDMAP = {};          /* market -> {call, url, t} */
 let LOCAL_MODE = false;
 function feedMapLoad(){ return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; renderFeedCoverage(); }); }
@@ -2957,13 +2968,14 @@ function candidatesFor(d){
   d.all.forEach(st=>{
     const dom = CALL_DOMAIN[baseCall(st.call)];
     if(!dom) return;
-    pathsFor(st.call, 3).forEach(path=>out.push({call:st.call, url:"https://"+dom+path}));
+    const owner = DS_OWNERS[baseCall(st.call)] || "";
+    pathsFor(st.call, owner ? 3 : 5).forEach(path=>out.push({call:st.call, url:"https://"+dom+path}));
   });
   /* one candidate per station first, then each station's second path, and so on */
   const byStation = {};
   out.forEach(c=>{ (byStation[c.call]=byStation[c.call]||[]).push(c); });
   const rounds = [];
-  for(let i=0;i<3;i++) Object.values(byStation).forEach(list=>{ if(list[i]) rounds.push(list[i]); });
+  for(let i=0;i<5;i++) Object.values(byStation).forEach(list=>{ if(list[i]) rounds.push(list[i]); });
   return rounds;
 }
 /* the survey: round by round, try the next candidate for every market still without a feed */
@@ -2991,6 +3003,12 @@ async function surveyFeeds(onProgress){
       results.forEach(res=>{
         const job = slice.find(x=>x.c.url===res.url); if(!job) return;
         const items = res.items || (res.ok && res.body && /<(rss|feed|item)[\s>]/i.test(res.body) ? parseRss(res.body) : []);
+        if(!(items && items.length)){
+          const b = (res.body||"").slice(0,400);
+          why(job.d.m, res.status===403||/access denied|forbidden|cloudflare|captcha|bot/i.test(b) ? "blocks the worker" :
+                       res.status===404 ? "no feed at the guessed paths" :
+                       res.error ? res.error : ("status "+(res.status||"?")));
+        }
         if(items && items.length){
           FEEDMAP[job.d.m] = {call:job.c.call, url:job.c.url, t:Date.now()};
           FEEDPATH[hostOf(job.c.url)] = {path: job.c.url.slice(("https://"+hostOf(job.c.url)).length), t:Date.now()};
@@ -3041,7 +3059,9 @@ async function discoverFeeds(markets, onProgress){
     try{ res = await proxyBatch(slice.map(p=>p.url)); }catch(e){}
     res.forEach(r=>{
       const pg = slice.find(p=>p.url===r.url); if(!pg || !r.body) return;
-      feedLinksIn(r.body, pg.url).forEach(u=>found.push({d:pg.d, call:pg.call, url:u}));
+      const links = feedLinksIn(r.body, pg.url);
+      if(!links.length) why(pg.d.m, "homepage advertises no feed");
+      links.forEach(u=>found.push({d:pg.d, call:pg.call, url:u}));
     });
     onProgress && onProgress("reading homepages "+Math.min(i+25,pages.length)+" of "+pages.length);
   }
@@ -3089,7 +3109,11 @@ async function rescueViaRss2json(markets, onProgress){
       try{
         const items = await viaRss2json(t.url);
         if(items.length){ FEEDMAP[d.m] = {call:t.call, url:t.url, t:Date.now(), how:"rss2json", via:"rss2json"}; n++; break; }
-      }catch(e){ if(/api key|very short period/i.test((e&&e.message)||"")) return n; }
+      }catch(e){
+        const m = (e&&e.message)||"";
+        why(d.m, /api key|very short period/i.test(m) ? "rss2json wants a key" : "rss2json: "+m.slice(0,40));
+        if(/api key|very short period/i.test(m)) return n;
+      }
     }
     onProgress && onProgress("trying rss2json for "+d.m);
   }
@@ -3101,7 +3125,8 @@ function renderFeedCoverage(){
   const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
   box.innerHTML = have
     ? '<div class="ktest ok">'+have+' of 210 markets have a proven station feed'+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length+' reached through rss2json)':'')+'.</div>'+
-      (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')
+      (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')+
+      (missing.some(d=>FEEDWHY[d.m]) ? '<details class="whybox"><summary>Why each one failed</summary>'+missing.map(d=>'<div class="ktest bad">'+esc(d.m)+': '+esc(FEEDWHY[d.m]||"not tried this session")+'</div>').join("")+'</details>' : '')
     : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
 }
 /* the sweep: every market's proven feed in batches of 25, Google local editions for the rest,
