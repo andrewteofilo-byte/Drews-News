@@ -303,6 +303,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <p class="hint">A Cloudflare Worker you run yourself. Ten lines, free, two minutes to set up, and it removes the relay problem completely: no rate limits, and the keyed APIs and translator work even when the public relays are blocked. Ask me for the worker file.</p>
     <label class="toggle"><input type="checkbox" id="scriptMode"><span>Script mode: load everything through script tags, for when an ad blocker or filter blocks ordinary requests</span></label>
     <button class="btn wide" id="surveyBtn">Find a feed for every market</button>
+    <button class="btn wide" id="surveyGaps">Retry just the fallback markets</button>
     <div id="feedCover"></div>
     <button class="btn wide" id="testFeeds">Test station feeds</button>
     <div id="feedTest"></div>
@@ -2217,7 +2218,7 @@ const OWNER_PATHS = {
   "Gray":["/arc/outboundfeeds/rss/?outputType=xml","/rss/"],
   "Graham":["/arc/outboundfeeds/rss/?outputType=xml","/feed/"],
   /* Sinclair publishes per-section feeds: komonews.com/news/index.rss and the like */
-  "Sinclair":["/news/index.rss","/feed/"],
+  "Sinclair":["/news/local/index.rss","/news/index.rss"],
   "Nexstar":["/feed/","/?feed=rss2"],
   /* Tegna: checked against wthr.com — the section is part of the path */
   "Tegna":["/feeds/syndication/rss/news","/feeds/syndication/rss/news/local"],
@@ -2998,8 +2999,64 @@ async function surveyFeeds(onProgress){
       onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length);
     }
   }
+  /* whatever guessing didn't find, ask the sites themselves */
+  const left = DMAS.filter(d=>!FEEDMAP[d.m]);
+  if(left.length) await discoverFeeds(left, msg=>onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length, msg));
   feedMapSave(); feedPathSave();
   return Object.keys(FEEDMAP).length;
+}
+/* Most news sites advertise their feed in the homepage header, as
+   <link rel="alternate" type="application/rss+xml" href="...">. Reading that is more reliable than
+   guessing a path, and it works for stations whose owner isn't in the register. */
+function feedLinksIn(html, base){
+  const out = [];
+  const re = /<link\b[^>]*>/gi; let m;
+  while((m = re.exec(html))){
+    const tag = m[0];
+    if(!/rel=["']?alternate/i.test(tag)) continue;
+    if(!/type=["']?application\/(rss|atom)\+xml/i.test(tag)) continue;
+    const href = (tag.match(/href=["']([^"']+)["']/i)||[])[1];
+    if(href) out.push(href);
+  }
+  /* some sites only link their feed from the page body */
+  (html.match(/href=["']([^"']*(?:\.rss|\/rss\/?|\/feed\/?|outboundfeeds\/rss[^"']*))["']/gi)||[])
+    .slice(0,6).forEach(a=>{ const u = (a.match(/href=["']([^"']+)/i)||[])[1]; if(u) out.push(u); });
+  return [...new Set(out.map(u=>{ try{ return new URL(u.replace(/&amp;/g,"&"), base).toString(); }catch(e){ return null; } }).filter(Boolean))]
+    .filter(u=>!/comments\/feed|\/wp-json|podcast/i.test(u)).slice(0,4);
+}
+async function discoverFeeds(markets, onProgress){
+  if(!PROXY_URL || !BATCH_OK || !markets.length) return;
+  /* 1. every station homepage in the markets still without a feed */
+  const pages = [];
+  markets.forEach(d=>d.all.forEach(st=>{
+    const dom = CALL_DOMAIN[baseCall(st.call)];
+    if(dom && !pages.some(p=>p.dom===dom)) pages.push({d, call:st.call, dom, url:"https://"+dom+"/"});
+  }));
+  const found = [];
+  for(let i=0;i<pages.length;i+=25){
+    const slice = pages.slice(i,i+25);
+    let res = [];
+    try{ res = await proxyBatch(slice.map(p=>p.url)); }catch(e){}
+    res.forEach(r=>{
+      const pg = slice.find(p=>p.url===r.url); if(!pg || !r.body) return;
+      feedLinksIn(r.body, pg.url).forEach(u=>found.push({d:pg.d, call:pg.call, url:u}));
+    });
+    onProgress && onProgress("reading homepages "+Math.min(i+25,pages.length)+" of "+pages.length);
+  }
+  /* 2. test what the homepages advertised */
+  for(let i=0;i<found.length;i+=25){
+    const slice = found.slice(i,i+25).filter(x=>!FEEDMAP[x.d.m]);
+    if(!slice.length) continue;
+    let res = [];
+    try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){}
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || FEEDMAP[job.d.m]) return;
+      if(r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){
+        FEEDMAP[job.d.m] = {call:job.call, url:job.url, t:Date.now(), how:"advertised"};
+      }
+    });
+    onProgress && onProgress("testing advertised feeds");
+  }
 }
 function renderFeedCoverage(){
   const box = $("feedCover"); if(!box) return;
@@ -3007,7 +3064,7 @@ function renderFeedCoverage(){
   const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
   box.innerHTML = have
     ? '<div class="ktest ok">'+have+' of 210 markets have a proven station feed.</div>'+
-      (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.slice(0,8).map(d=>d.m).join(", "))+(missing.length>8?"…":"")+'</div>' : '')
+      (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')
     : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
 }
 /* the sweep: every market's proven feed in batches of 25, Google local editions for the rest,
@@ -3914,6 +3971,15 @@ function init(){
   $("directMode").addEventListener("change",e=>{ DIRECT_MODE=e.target.checked; filtersSave(); setBusy(false); updateTargets(); });
   $("fastMode").addEventListener("change",e=>{ FAST_MODE=e.target.checked; filtersSave(); setBusy(false); });
   $("localMode").addEventListener("change",e=>{ LOCAL_MODE=e.target.checked; filtersSave(); setBusy(false); });
+  $("surveyGaps").addEventListener("click",async()=>{
+    if(busy) return;
+    const btn = $("surveyGaps");
+    const before = Object.keys(FEEDMAP).length;
+    busy = true; STOP = false; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    const n = await surveyFeeds((r,c,got,msg)=>{ btn.textContent = msg ? msg : ("Round "+r+" · "+got+" of 210"); });
+    busy = false; btn.disabled = false; btn.textContent = "Retry just the fallback markets";
+    progress(1,1,"Found "+(n-before)+" more. "+n+" of 210 markets now have a station feed.");
+  });
   $("surveyBtn").addEventListener("click",async()=>{
     if(busy) return;
     const btn = $("surveyBtn");
