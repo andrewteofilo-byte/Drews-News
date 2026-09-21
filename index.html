@@ -278,6 +278,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="fPinned"><span>Only pinned markets</span></label>
     <label class="toggle"><input type="checkbox" id="fUnseen"><span>Only what is new since the last pull</span></label>
     <label class="toggle"><input type="checkbox" id="useYahoo"><span>Also try Yahoo News (blocked more often than not)</span></label>
+    <label class="toggle"><input type="checkbox" id="localMode"><span>Local mode: one proven station feed for all 210 markets, plus one Google search — purely local</span></label>
     <label class="toggle"><input type="checkbox" id="fastMode"><span>Fast mode: station feeds for up to 20 markets (pinned first, then whoever is near a newscast), one Google search and one API call</span></label>
     <label class="toggle"><input type="checkbox" id="directMode"><span>Direct mode: read the stations' own feeds and the APIs only — no Google, Bing or public relays</span></label>
     <label class="toggle"><input type="checkbox" id="useSpanish" checked><span>Spanish desk: read Univision and Telemundo markets in Spanish and translate</span></label>
@@ -301,6 +302,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <input id="proxyUrl" class="search" placeholder="https://your-worker.workers.dev/" autocomplete="off">
     <p class="hint">A Cloudflare Worker you run yourself. Ten lines, free, two minutes to set up, and it removes the relay problem completely: no rate limits, and the keyed APIs and translator work even when the public relays are blocked. Ask me for the worker file.</p>
     <label class="toggle"><input type="checkbox" id="scriptMode"><span>Script mode: load everything through script tags, for when an ad blocker or filter blocks ordinary requests</span></label>
+    <button class="btn wide" id="surveyBtn">Find a feed for every market</button>
+    <div id="feedCover"></div>
     <button class="btn wide" id="testFeeds">Test station feeds</button>
     <div id="feedTest"></div>
     <button class="btn wide" id="testConn">Test the connection</button>
@@ -2724,6 +2727,7 @@ async function sweep(){
   if(busy) return;
   busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
   const feed = fn => async()=>{ const r = await fn(); ingest(r, null); livePaint(); return []; };
+  if(LOCAL_MODE) return localSweep();
   if(FAST_MODE) return fastSweep();
   if(DIRECT_MODE) return directSweep();
   const tasks = [];
@@ -2937,6 +2941,119 @@ async function directSweep(){
   finish();
 }
 
+/* ================= LOCAL MODE =================
+   Purely local: one proven station feed for every one of the 210 markets, plus one Google search.
+   The feed per market is found once by a survey through your proxy and remembered; a market where
+   no station publishes a feed falls back to Google's local edition for that town, so every market
+   is covered by something. */
+const FEEDMAP_KEY = "ds-hyperlocal-feedmap";
+let FEEDMAP = {};          /* market -> {call, url, t} */
+let LOCAL_MODE = false;
+function feedMapLoad(){ return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; renderFeedCoverage(); }); }
+function feedMapSave(){ storeSet(FEEDMAP_KEY, FEEDMAP); renderFeedCoverage(); }
+function candidatesFor(d){
+  const out = [];
+  d.all.forEach(st=>{
+    const dom = CALL_DOMAIN[baseCall(st.call)];
+    if(!dom) return;
+    pathsFor(st.call, 3).forEach(path=>out.push({call:st.call, url:"https://"+dom+path}));
+  });
+  /* one candidate per station first, then each station's second path, and so on */
+  const byStation = {};
+  out.forEach(c=>{ (byStation[c.call]=byStation[c.call]||[]).push(c); });
+  const rounds = [];
+  for(let i=0;i<3;i++) Object.values(byStation).forEach(list=>{ if(list[i]) rounds.push(list[i]); });
+  return rounds;
+}
+/* the survey: round by round, try the next candidate for every market still without a feed */
+async function surveyFeeds(onProgress){
+  const todo = DMAS.filter(d=>!FEEDMAP[d.m]);
+  const queues = {};
+  todo.forEach(d=>{ queues[d.m] = candidatesFor(d); });
+  let round = 0, calls = 0;
+  while(true){
+    const batch = [];
+    todo.forEach(d=>{ if(!FEEDMAP[d.m] && queues[d.m].length) batch.push({d, c:queues[d.m].shift()}); });
+    if(!batch.length || STOP) break;
+    round++;
+    for(let i=0;i<batch.length;i+=25){
+      const slice = batch.slice(i,i+25);
+      let results = [];
+      try{
+        if(PROXY_URL && BATCH_OK) results = await proxyBatch(slice.map(x=>x.c.url));
+        else results = await Promise.all(slice.map(async x=>{
+          try{ const it = await fetchFeed(x.c.url); return {url:x.c.url, ok:true, items:it}; }
+          catch(e){ return {url:x.c.url, ok:false}; }
+        }));
+      }catch(e){ results = []; }
+      calls++;
+      results.forEach(res=>{
+        const job = slice.find(x=>x.c.url===res.url); if(!job) return;
+        const items = res.items || (res.ok && res.body && /<(rss|feed|item)[\s>]/i.test(res.body) ? parseRss(res.body) : []);
+        if(items && items.length){
+          FEEDMAP[job.d.m] = {call:job.c.call, url:job.c.url, t:Date.now()};
+          FEEDPATH[hostOf(job.c.url)] = {path: job.c.url.slice(("https://"+hostOf(job.c.url)).length), t:Date.now()};
+        }
+      });
+      onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length);
+    }
+  }
+  feedMapSave(); feedPathSave();
+  return Object.keys(FEEDMAP).length;
+}
+function renderFeedCoverage(){
+  const box = $("feedCover"); if(!box) return;
+  const have = DMAS.filter(d=>FEEDMAP[d.m]).length;
+  const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
+  box.innerHTML = have
+    ? '<div class="ktest ok">'+have+' of 210 markets have a proven station feed.</div>'+
+      (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.slice(0,8).map(d=>d.m).join(", "))+(missing.length>8?"…":"")+'</div>' : '')
+    : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
+}
+/* the sweep: every market's proven feed in batches of 25, Google local editions for the rest,
+   and one Google search on top. */
+async function localSweep(){
+  busy = true; STOP = false; setBusy(true,"sweep"); beginPull();
+  if(!Object.keys(FEEDMAP).length){
+    progress(0,1,"First run: finding a feed for every market…");
+    await surveyFeeds((r,c,n)=>progress(n,210,"Finding feeds · round "+r+" · "+n+" of 210 markets found"));
+  }
+  const mapped = DMAS.filter(d=>FEEDMAP[d.m]);
+  const unmapped = DMAS.filter(d=>!FEEDMAP[d.m]);
+  const jobs = [];
+  for(let i=0;i<mapped.length;i+=25){
+    const slice = mapped.slice(i,i+25);
+    jobs.push((async()=>{
+      try{
+        let results;
+        if(PROXY_URL && BATCH_OK) results = await proxyBatch(slice.map(d=>FEEDMAP[d.m].url));
+        else results = await Promise.all(slice.map(async d=>{
+          try{ return {url:FEEDMAP[d.m].url, ok:true, items:await fetchFeed(FEEDMAP[d.m].url)}; }
+          catch(e){ return {url:FEEDMAP[d.m].url, ok:false}; }
+        }));
+        HEALTH.station.ok++; HEALTH.station.last = "ok";
+        results.forEach(res=>{
+          const d = slice.find(x=>FEEDMAP[x.m].url===res.url); if(!d) return;
+          const items = res.items || (res.ok && res.body && /<(rss|feed|item)[\s>]/i.test(res.body) ? parseRss(res.body) : []);
+          if(!items.length){ return; }
+          const call = FEEDMAP[d.m].call;
+          const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:baseCall(call), srcUrl:"https://"+hostOf(res.url), desc:it.desc||"", prov:"station"}));
+          HEALTH.station.items += arts.length;
+          ingest(arts, [d.id]);
+        });
+      }catch(e){ HEALTH.station.fail++; HEALTH.station.last = ((e&&e.message)||"failed").slice(0,90); }
+      livePaint(); renderHealth();
+    })());
+  }
+  /* markets with no station feed: Google's local edition for the town */
+  unmapped.forEach(d=>jobs.push(run("geo",()=>pGeo(d.city+", "+((STATES[d.st]||[""])[0]||d.st))).then(r=>{ ingest(r,[d.id]); livePaint(); })));
+  jobs.push(run("google",()=>pGoogle(FAST_GOOGLE)).then(r=>{ ingest(r,null); natFromArticles(r,"the same Google pull"); livePaint(); }));
+  let done = 0;
+  jobs.forEach(j=>j.then(()=>progress(++done, jobs.length, "Pulled "+done+" of "+jobs.length+" · "+Math.round((Date.now()-pullStart)/1000)+" s"), ()=>done++));
+  await Promise.all(jobs);
+  finish();
+}
+
 /* ================= FAST SWEEP =================
    Two requests, nothing else. GDELT answers one broad query with up to 250 US articles covering
    the full 24 hours, and one Google search adds what GDELT's source list misses. The National Desk
@@ -3013,7 +3130,7 @@ async function deepScan(list){
 
 function setBusy(on, mode){
   $("sweep").disabled = on && mode!=="sweep";
-  $("sweep").textContent = on && mode==="sweep" ? "Sweeping…" : (FAST_MODE ? "Fast sweep" : DIRECT_MODE ? "Read station feeds" : "Sweep all markets");
+  $("sweep").textContent = on && mode==="sweep" ? "Sweeping…" : (LOCAL_MODE ? "Local sweep · 210 markets" : FAST_MODE ? "Fast sweep" : DIRECT_MODE ? "Read station feeds" : "Sweep all markets");
   if(on && mode==="scan"){ $("scanGo").textContent = "Stop"; $("scanGo").disabled = false; }
   if(on && mode==="sweep") $("scanGo").disabled = true;
   $("tally").classList.toggle("on", on);
@@ -3214,7 +3331,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -3796,6 +3913,17 @@ function init(){
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
   $("directMode").addEventListener("change",e=>{ DIRECT_MODE=e.target.checked; filtersSave(); setBusy(false); updateTargets(); });
   $("fastMode").addEventListener("change",e=>{ FAST_MODE=e.target.checked; filtersSave(); setBusy(false); });
+  $("localMode").addEventListener("change",e=>{ LOCAL_MODE=e.target.checked; filtersSave(); setBusy(false); });
+  $("surveyBtn").addEventListener("click",async()=>{
+    if(busy) return;
+    const btn = $("surveyBtn");
+    if(Object.keys(FEEDMAP).length && !confirm("Start the survey again from scratch? Markets already mapped will be re-checked.")) return;
+    FEEDMAP = {};
+    busy = true; STOP = false; btn.disabled = true; btn.textContent = "Surveying…"; beginPull();
+    const n = await surveyFeeds((r,c,got)=>{ btn.textContent = "Round "+r+" · "+got+" of 210"; progress(got,210,"Finding feeds · "+got+" of 210 markets"); });
+    busy = false; btn.disabled = false; btn.textContent = "Find a feed for every market";
+    progress(1,1,"Survey done: "+n+" of 210 markets have a station feed. Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
+  });
   storeGet(PROXY_KEY,"").then(v=>{ if(v){ PROXY_URL = v; $("proxyUrl").value = v; } });
   storeGet(PROXY_NO_KEY,[]).then(v=>{ (v||[]).forEach(x=>PROXY_NO.add(x)); });
   $("proxyUrl").addEventListener("change",e=>{
@@ -4055,6 +4183,7 @@ function init(){
     if(typeof f.spanish==="boolean"){ USE_SPANISH=f.spanish; $("useSpanish").checked=f.spanish; }
     if(typeof f.direct==="boolean"){ DIRECT_MODE=f.direct; $("directMode").checked=f.direct; }
     if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
+    if(typeof f.localMode==="boolean"){ LOCAL_MODE=f.localMode; $("localMode").checked=f.localMode; setBusy(false); }
     if(f.size && SIZE_TEST[f.size]){ SIZE=f.size; $("size").value=f.size; }
     if(f.sort && SORTS[f.sort]){ SORT=f.sort; $("sort").value=f.sort; }
     if(Array.isArray(f.slots)){
@@ -4069,7 +4198,7 @@ function init(){
     Object.values(PORTER).forEach(e=>{ if(NAME_MIGRATE[e.market]) e.market = NAME_MIGRATE[e.market]; });
     refreshRegionList(); updateTargets(); build(); render();
   });
-  keyUseLoad(); feedPathLoad();
+  keyUseLoad(); feedPathLoad(); feedMapLoad();
   keysLoad().then(()=>{
     ["newsdata","currents","gnews","rss2json"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
     renderHealth();
