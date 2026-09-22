@@ -305,6 +305,14 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="scriptMode"><span>Script mode: load everything through script tags, for when an ad blocker or filter blocks ordinary requests</span></label>
     <button class="btn wide" id="surveyBtn">Find a feed for every market</button>
     <button class="btn wide" id="surveyGaps">Retry just the fallback markets</button>
+    <div class="row2" style="margin-top:10px">
+      <select id="tierPick" aria-label="Which markets">
+        <option value="top">Markets 1–50 · up to 5 each</option>
+        <option value="mid">Markets 51–100 · up to 4 each</option>
+        <option value="low">Markets 101–170 · up to 3 each</option>
+      </select>
+      <button class="btn" id="surveyTop">Add stations</button>
+    </div>
     <div id="feedCover"></div>
     <button class="btn wide" id="testFeeds">Test station feeds</button>
     <div id="feedTest"></div>
@@ -3181,12 +3189,73 @@ async function rescueViaRss2json(markets, onProgress){
   }
   return n;
 }
+/* ================= MORE STATIONS FOR THE TOP 50 =================
+   In the biggest markets one feed per market misses most of the competition, so every station
+   there with a working feed is added (up to five a market). Stored alongside the main feed as
+   FEEDMAP[m].extra, so the survey's work is kept. */
+/* tiers by market rank: the biggest get every newsroom, the middle get a few, 171 and below keep one */
+const TIERS = {top:{lo:1,hi:50,max:4,label:"Markets 1–50"}, mid:{lo:51,hi:100,max:3,label:"Markets 51–100"}, low:{lo:101,hi:170,max:2,label:"Markets 101–170"}};
+const TOP_N = 50, EXTRA_MAX = 4;
+async function surveyExtras(onProgress, tierKey){
+  if(!PROXY_URL || !BATCH_OK) return 0;
+  const tier = TIERS[tierKey||"top"];
+  const top = DMAS.filter(d=>d.rank>=tier.lo && d.rank<tier.hi+1 && FEEDMAP[d.m]);
+  const cap = tier.max;
+  /* which path worked for each owner so far, so a sister station starts on the right one */
+  const ownerPath = {};
+  Object.values(FEEDMAP).forEach(f=>{
+    [f].concat(f.extra||[]).forEach(e=>{
+      if(!e.call) return;
+      const o = (DS_OWNERS[baseCall(e.call)]||"").split(" ")[0];
+      if(o && !ownerPath[o]) ownerPath[o] = e.url.replace(/^https?:\/\/[^\/]+/,"");
+    });
+  });
+  const queue = [];
+  top.forEach(d=>{
+    const have = new Set([FEEDMAP[d.m].call].concat((FEEDMAP[d.m].extra||[]).map(e=>e.call)).map(baseCall));
+    const haveDom = new Set([hostOf(FEEDMAP[d.m].url)].concat((FEEDMAP[d.m].extra||[]).map(e=>hostOf(e.url))));
+    d.all.forEach(st=>{
+      const b = baseCall(st.call), dom = CALL_DOMAIN[b];
+      if(!dom || have.has(b) || haveDom.has(dom)) return;       /* sister stations often share one site */
+      haveDom.add(dom);
+      const o = (DS_OWNERS[b]||"").split(" ")[0];
+      const paths = [...new Set([ownerPath[o]].concat(pathsFor(st.call, 3)).filter(Boolean))];
+      queue.push({d, call:st.call, dom, paths});
+    });
+  });
+  let added = 0;
+  for(let round=0; round<3; round++){
+    const batch = queue.filter(q=>!q.done && q.paths[round] && (FEEDMAP[q.d.m].extra||[]).length < cap)
+                       .map(q=>({q, url:"https://"+q.dom+q.paths[round]}));
+    for(let i=0;i<batch.length;i+=25){
+      const slice = batch.slice(i,i+25);
+      let res = []; try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){}
+      res.forEach(r=>{
+        const job = slice.find(x=>x.url===r.url); if(!job) return;
+        if(r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){
+          const f = FEEDMAP[job.q.d.m];
+          f.extra = f.extra || [];
+          if(f.extra.length < cap){ f.extra.push({call:job.q.call, url:job.url}); added++; }
+          job.q.done = true;
+        }
+      });
+      onProgress && onProgress("adding stations · "+added+" found");
+    }
+  }
+  feedMapSave();
+  return added;
+}
 function renderFeedCoverage(){
   const box = $("feedCover"); if(!box) return;
   const have = DMAS.filter(d=>FEEDMAP[d.m]).length;
   const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
   box.innerHTML = have
-    ? '<div class="ktest ok">'+have+' of 210 markets have a proven local feed'+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].paper).length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].paper).length+' from newspapers)':'')+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length+' reached through rss2json)':'')+'.</div>'+
+    ? Object.values(TIERS).map(t=>{
+          const inTier = DMAS.filter(d=>d.rank>=t.lo && d.rank<t.hi+1 && FEEDMAP[d.m]);
+          const ex = inTier.reduce((n,d)=>n+((FEEDMAP[d.m].extra)||[]).length,0);
+          return ex ? '<div class="ktest ok">'+t.label+': '+(ex+inTier.length)+' newsrooms read directly ('+ex+' extra feeds).</div>' : '';
+        }).join("")+
+      '<div class="ktest ok">'+have+' of 210 markets have a proven local feed'+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].paper).length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].paper).length+' from newspapers)':'')+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length+' reached through rss2json)':'')+'.</div>'+
       (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')+
       (missing.some(d=>FEEDWHY[d.m]) ? '<details class="whybox"><summary>Why each one failed</summary>'+missing.map(d=>'<div class="ktest bad">'+esc(d.m)+': '+esc(FEEDWHY[d.m]||"not tried this session")+'</div>').join("")+'</details>' : '')
     : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
@@ -3200,27 +3269,34 @@ async function localSweep(){
     await surveyFeeds((r,c,n)=>progress(n,210,"Finding feeds · round "+r+" · "+n+" of 210 markets found"));
   }
   const mapped = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via!=="rss2json");
+  /* every feed to read this sweep: each market's main one, plus the extra stations in the top 50 */
+  const reads = [];
+  mapped.forEach(d=>{
+    reads.push({d, call:FEEDMAP[d.m].call, paper:FEEDMAP[d.m].paper, url:FEEDMAP[d.m].url});
+    (FEEDMAP[d.m].extra||[]).forEach(e=>reads.push({d, call:e.call, url:e.url}));
+  });
   const viaR2J = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via==="rss2json");
   const unmapped = DMAS.filter(d=>!FEEDMAP[d.m]);
   const jobs = [];
-  for(let i=0;i<mapped.length;i+=25){
-    const slice = mapped.slice(i,i+25);
+  for(let i=0;i<reads.length;i+=25){
+    const slice = reads.slice(i,i+25);
     jobs.push((async()=>{
       try{
         let results;
-        if(PROXY_URL && BATCH_OK) results = await proxyBatch(slice.map(d=>FEEDMAP[d.m].url));
-        else results = await Promise.all(slice.map(async d=>{
-          try{ return {url:FEEDMAP[d.m].url, ok:true, items:await fetchFeed(FEEDMAP[d.m].url)}; }
-          catch(e){ return {url:FEEDMAP[d.m].url, ok:false}; }
+        if(PROXY_URL && BATCH_OK) results = await proxyBatch(slice.map(r=>r.url));
+        else results = await Promise.all(slice.map(async r=>{
+          try{ return {url:r.url, ok:true, items:await fetchFeed(r.url)}; }
+          catch(e){ return {url:r.url, ok:false}; }
         }));
         HEALTH.station.ok++; HEALTH.station.last = "ok";
         results.forEach(res=>{
-          const d = slice.find(x=>FEEDMAP[x.m].url===res.url); if(!d) return;
+          const rd = slice.find(x=>x.url===res.url); if(!rd) return;
+          const d = rd.d;
           if(!FEEDMAP[d.m].call && FEEDMAP[d.m].paper){ HEALTH.paper = HEALTH.paper || {ok:0,fail:0,items:0}; }
           const items = res.items || (res.ok && res.body && /<(rss|feed|item)[\s>]/i.test(res.body) ? parseRss(res.body) : []);
           if(!items.length){ return; }
-          const call = FEEDMAP[d.m].call;
-          const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(FEEDMAP[d.m].paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
+          const call = rd.call;
+          const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(rd.paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
           HEALTH.station.items += arts.length;
           ingest(arts, [d.id]);
         });
@@ -4128,6 +4204,15 @@ function init(){
   $("directMode").addEventListener("change",e=>{ DIRECT_MODE=e.target.checked; filtersSave(); setBusy(false); updateTargets(); });
   $("fastMode").addEventListener("change",e=>{ FAST_MODE=e.target.checked; filtersSave(); setBusy(false); });
   $("localMode").addEventListener("change",e=>{ LOCAL_MODE=e.target.checked; filtersSave(); setBusy(false); });
+  $("surveyTop").addEventListener("click",async()=>{
+    if(busy) return;
+    if(!Object.keys(FEEDMAP).length){ progress(0,1,"Run the main survey first."); return; }
+    const btn = $("surveyTop"), tier = $("tierPick").value;
+    busy = true; STOP = false; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    const n = await surveyExtras(msg=>{ btn.textContent = msg.replace("adding stations · ",""); }, tier);
+    busy = false; btn.disabled = false; btn.textContent = "Add stations";
+    progress(1,1,"Added "+n+" station feeds for "+TIERS[tier].label.toLowerCase()+". Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
+  });
   $("surveyGaps").addEventListener("click",async()=>{
     if(busy) return;
     const btn = $("surveyGaps");
