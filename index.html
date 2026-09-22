@@ -111,6 +111,7 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .relayhead{grid-column:1 / -1;color:var(--dim);font-size:12px;margin-top:8px;border-top:1px solid var(--line);padding-top:6px}
 .eslang{background:#8c7ae6;color:#0f1c2e;font-family:var(--body);font-size:11.5px;font-weight:700;border-radius:3px;padding:1px 5px;vertical-align:middle}
 .esorig{font-size:13px;color:var(--dim);font-style:italic;margin:-2px 0 4px}
+.dimtxt{color:var(--dim);font-weight:400}
 .whybox summary{cursor:pointer;font-size:12.5px;color:var(--dim);margin-top:4px}
 .errline{grid-column:1 / -1;font-size:12px;color:#ff9d97;word-break:break-word;margin:-1px 0 4px}
 .ktest{font-size:12.5px;margin:4px 0;word-break:break-word}
@@ -313,6 +314,9 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       </select>
       <button class="btn" id="surveyTop">Add stations</button>
     </div>
+    <div id="passReport"></div>
+    <p class="lab" style="margin-top:10px">Every feed being read</p>
+    <div id="feedList"></div>
     <div id="feedCover"></div>
     <button class="btn wide" id="testFeeds">Test station feeds</button>
     <div id="feedTest"></div>
@@ -2970,8 +2974,11 @@ const FEEDWHY = {};        /* market -> what the last attempts ran into */
 function why(m, s){ FEEDWHY[m] = FEEDWHY[m] ? (FEEDWHY[m].split(" · ").includes(s) ? FEEDWHY[m] : FEEDWHY[m]+" · "+s) : s; }
 let FEEDMAP = {};          /* market -> {call, url, t} */
 let LOCAL_MODE = false;
-function feedMapLoad(){ return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; renderFeedCoverage(); }); }
-function feedMapSave(){ storeSet(FEEDMAP_KEY, FEEDMAP); renderFeedCoverage(); }
+function feedMapLoad(){
+  storeGet("ds-hyperlocal-lastpass",null).then(v=>{ LAST_PASS = v; renderPassReport(); });
+  return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; renderFeedCoverage(); renderFeedList(); });
+}
+function feedMapSave(){ storeSet(FEEDMAP_KEY, FEEDMAP); renderFeedCoverage(); renderFeedList(); }
 /* Newspapers for the markets where every station site refuses automated requests. Paths are
    guesses by platform; the survey tests them and reads each homepage's advertised feed as well. */
 const NEWSPAPERS = {
@@ -3201,6 +3208,8 @@ async function surveyExtras(onProgress, tierKey){
   const tier = TIERS[tierKey||"top"];
   const top = DMAS.filter(d=>d.rank>=tier.lo && d.rank<tier.hi+1 && FEEDMAP[d.m]);
   const cap = tier.max;
+  const report = {};          /* market -> {added:[call], missed:[{call, why}]} */
+  top.forEach(d=>{ report[d.m] = {added:[], missed:[]}; });
   /* which path worked for each owner so far, so a sister station starts on the right one */
   const ownerPath = {};
   Object.values(FEEDMAP).forEach(f=>{
@@ -3235,15 +3244,61 @@ async function surveyExtras(onProgress, tierKey){
         if(r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){
           const f = FEEDMAP[job.q.d.m];
           f.extra = f.extra || [];
-          if(f.extra.length < cap){ f.extra.push({call:job.q.call, url:job.url}); added++; }
+          if(f.extra.length < cap){ f.extra.push({call:job.q.call, url:job.url}); added++; report[job.q.d.m].added.push(job.q.call); }
           job.q.done = true;
+        }else{
+          const b = (r.body||"").slice(0,300);
+          job.q.why = r.status===401 ? "site refuses automated reads" :
+                      r.status===403||/access denied|forbidden|captcha|bot/i.test(b) ? "blocks the worker" :
+                      r.status===404 ? "no feed found" :
+                      r.status>=520 ? "site's own server error" :
+                      r.error ? r.error : "no feed found";
         }
       });
       onProgress && onProgress("adding stations · "+added+" found");
     }
   }
+  /* anything never found gets its last reason; stations skipped for sharing a site are noted too */
+  queue.forEach(q=>{ if(!q.done) report[q.d.m].missed.push({call:q.call, why:q.why||"no feed found"}); });
+  LAST_PASS = {tier:tier.label, when:Date.now(), added, report};
+  storeSet("ds-hyperlocal-lastpass", LAST_PASS);
   feedMapSave();
+  renderPassReport();
   return added;
+}
+let LAST_PASS = null;
+function renderPassReport(){
+  const box = $("passReport"); if(!box) return;
+  if(!LAST_PASS){ box.innerHTML = ""; return; }
+  const rows = Object.entries(LAST_PASS.report);
+  const gained = rows.filter(([m,r])=>r.added.length);
+  const nothing = rows.filter(([m,r])=>!r.added.length);
+  const when = new Date(LAST_PASS.when).toLocaleString("en-AU",{timeZone:"Australia/Sydney",weekday:"short",hour:"numeric",minute:"2-digit"});
+  box.innerHTML =
+    '<div class="ktest ok">Last pass: '+esc(LAST_PASS.tier)+', '+when+' — added '+LAST_PASS.added+' feeds in '+gained.length+' of '+rows.length+' markets.</div>'+
+    '<details class="whybox" open><summary>What it added</summary>'+
+      (gained.length ? gained.map(([m,r])=>'<div class="ktest ok">'+esc(m)+': '+esc(r.added.join(", "))+
+        (r.missed.length?' <span class="dimtxt">· not '+esc(r.missed.map(x=>x.call).join(", "))+'</span>':'')+'</div>').join("")
+        : '<div class="ktest off">Nothing new this pass.</div>')+
+    '</details>'+
+    (nothing.length ? '<details class="whybox"><summary>Markets where nothing was added ('+nothing.length+')</summary>'+
+      nothing.map(([m,r])=>'<div class="ktest bad">'+esc(m)+': '+(r.missed.length ? esc(r.missed.map(x=>x.call+" ("+x.why+")").join(", ")) : "every station already read, or they share one site")+'</div>').join("")+
+    '</details>' : '');
+}
+
+/* every feed being read, market by market, grouped by tier */
+function renderFeedList(){
+  const box = $("feedList"); if(!box) return;
+  const groups = [["Markets 1–50",1,50],["Markets 51–100",51,100],["Markets 101–170",101,170],["Markets 171 and below",171,999]];
+  box.innerHTML = groups.map(([label,lo,hi])=>{
+    const list = DMAS.filter(d=>d.rank>=lo && d.rank<hi+1).sort((a,b)=>a.rank-b.rank);
+    return '<details class="whybox"><summary>'+label+'</summary>'+list.map(d=>{
+      const f = FEEDMAP[d.m];
+      if(!f) return '<div class="ktest off">#'+Math.floor(d.rank)+' '+esc(d.m)+': Google local edition</div>';
+      const names = [f.call ? f.call : (f.paper ? f.paper+" (newspaper)" : "?")].concat((f.extra||[]).map(e=>e.call));
+      return '<div class="ktest ok">#'+Math.floor(d.rank)+' '+esc(d.m)+': '+esc(names.join(", "))+(f.via==="rss2json"?' <span class="dimtxt">via rss2json</span>':'')+'</div>';
+    }).join("")+'</details>';
+  }).join("");
 }
 function renderFeedCoverage(){
   const box = $("feedCover"); if(!box) return;
