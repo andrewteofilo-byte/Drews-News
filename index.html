@@ -1803,7 +1803,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -2091,7 +2091,8 @@ function parseRss(xml){
     const inner = link.match(/[?&]url=([^&]+)/);
     if(/bing\.com/.test(link) && inner){ try{ link = decodeURIComponent(inner[1]); }catch(e){} }
     let desc = g("description").replace(/<[^>]+>/g," ");
-    return {title:g("title"), link, date:Date.parse(g("pubDate"))||0, src, srcUrl, desc};
+    const author = (g("dc:creator")||g("author")||"").replace(/<[^>]+>/g," ").trim();
+    return {title:g("title"), link, date:Date.parse(g("pubDate"))||0, src, srcUrl, desc, author};
   });
 }
 function cleanTitle(t, src){
@@ -2963,6 +2964,65 @@ let FEEDMAP = {};          /* market -> {call, url, t} */
 let LOCAL_MODE = false;
 function feedMapLoad(){ return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; renderFeedCoverage(); }); }
 function feedMapSave(){ storeSet(FEEDMAP_KEY, FEEDMAP); renderFeedCoverage(); }
+/* Newspapers for the markets where every station site refuses automated requests. Paths are
+   guesses by platform; the survey tests them and reads each homepage's advertised feed as well. */
+const NEWSPAPERS = {
+  "Jacksonville":[["Florida Times-Union","jacksonville.com"]],
+  "Ft. Myers-Naples":[["News-Press","news-press.com"],["Naples Daily News","naplesnews.com"]],
+  "Spokane":[["Spokesman-Review","spokesman.com",["/feeds/stories/"]]],
+  "Portland-Auburn, ME":[["Portland Press Herald","pressherald.com"],["Sun Journal","sunjournal.com"]],
+  "Eugene":[["Register-Guard","registerguard.com"]],
+  "Yakima-Pasco-Richland":[["Yakima Herald","yakimaherald.com"],["Tri-City Herald","tri-cityherald.com"]],
+  "Chico-Redding":[["Chico Enterprise-Record","chicoer.com"],["Record Searchlight","redding.com"]],
+  "Medford-Klamath Falls":[["Rogue Valley Times","roguevalleytimes.com"],["Herald and News","heraldandnews.com"]],
+  "Beaumont-Port Arthur":[["Beaumont Enterprise","beaumontenterprise.com"],["Port Arthur News","panews.com"]],
+  "Greenwood-Greenville":[["Greenwood Commonwealth","gwcommonwealth.com"]],
+  "Twin Falls":[["Times-News","magicvalley.com"]],
+  "Bend":[["Bend Bulletin","bendbulletin.com"]],
+  "Eureka":[["Times-Standard","times-standard.com"],["Lost Coast Outpost","lostcoastoutpost.com"]],
+  "Cheyenne-Scottsbluff":[["Wyoming Tribune Eagle","wyomingnews.com"],["Star-Herald","starherald.com"]],
+  "Casper-Riverton":[["Casper Star-Tribune","trib.com"],["County 10","county10.com"]],
+  "Victoria":[["Victoria Advocate","victoriaadvocate.com"]],
+  "Alpena":[["Alpena News","thealpenanews.com"]],
+  "Minot-Bismarck-Dickinson":[["Bismarck Tribune","bismarcktribune.com"],["Minot Daily News","minotdailynews.com"]]
+};
+const PAPER_PATHS = ["/feed/","/rss/",BLOX_PATH,"/rss","/arcio/rss/","/news/?format=rss"];
+function paperCandidates(d){
+  const out = [];
+  (NEWSPAPERS[d.m]||[]).forEach(([name, dom, own])=>{
+    (own||[]).concat(PAPER_PATHS).forEach(path=>out.push({call:null, paper:name, url:"https://"+dom+path}));
+  });
+  return out;
+}
+async function surveyPapers(markets, onProgress){
+  if(!PROXY_URL || !BATCH_OK) return 0;
+  let found = 0;
+  const todo = markets.filter(d=>NEWSPAPERS[d.m] && !FEEDMAP[d.m]);
+  /* 1. homepages first, since an advertised feed beats a guessed one */
+  const pages = [];
+  todo.forEach(d=>(NEWSPAPERS[d.m]||[]).forEach(([name,dom])=>pages.push({d, name, url:"https://"+dom+"/"})));
+  const tryList = [];
+  for(let i=0;i<pages.length;i+=25){
+    const slice = pages.slice(i,i+25);
+    let res = []; try{ res = await proxyBatch(slice.map(p=>p.url)); }catch(e){}
+    res.forEach(r=>{ const pg = slice.find(p=>p.url===r.url); if(pg && r.body) feedLinksIn(r.body, pg.url).forEach(u=>tryList.push({d:pg.d, paper:pg.name, url:u})); });
+  }
+  /* 2. then the guessed paths */
+  todo.forEach(d=>paperCandidates(d).forEach(c=>tryList.push({d, paper:c.paper, url:c.url})));
+  for(let i=0;i<tryList.length;i+=25){
+    const slice = tryList.slice(i,i+25).filter(x=>!FEEDMAP[x.d.m]);
+    if(!slice.length) continue;
+    let res = []; try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){}
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || FEEDMAP[job.d.m]) return;
+      if(r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){
+        FEEDMAP[job.d.m] = {call:null, paper:job.paper, url:job.url, t:Date.now(), how:"newspaper"}; found++;
+      }
+    });
+    onProgress && onProgress("trying newspapers");
+  }
+  return found;
+}
 function candidatesFor(d){
   const out = [];
   d.all.forEach(st=>{
@@ -3020,6 +3080,8 @@ async function surveyFeeds(onProgress){
   /* whatever guessing didn't find, ask the sites themselves */
   const left = DMAS.filter(d=>!FEEDMAP[d.m]);
   if(left.length) await discoverFeeds(left, msg=>onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length, msg));
+  const papersFor = DMAS.filter(d=>!FEEDMAP[d.m]);
+  if(papersFor.length) await surveyPapers(papersFor, msg=>onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length, msg));
   const stillLeft = DMAS.filter(d=>!FEEDMAP[d.m]);
   if(stillLeft.length) await rescueViaRss2json(stillLeft, msg=>onProgress && onProgress(round, calls, Object.keys(FEEDMAP).length, msg));
   feedMapSave(); feedPathSave();
@@ -3124,7 +3186,7 @@ function renderFeedCoverage(){
   const have = DMAS.filter(d=>FEEDMAP[d.m]).length;
   const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
   box.innerHTML = have
-    ? '<div class="ktest ok">'+have+' of 210 markets have a proven station feed'+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length+' reached through rss2json)':'')+'.</div>'+
+    ? '<div class="ktest ok">'+have+' of 210 markets have a proven local feed'+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].paper).length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].paper).length+' from newspapers)':'')+(DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length?' ('+DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length+' reached through rss2json)':'')+'.</div>'+
       (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')+
       (missing.some(d=>FEEDWHY[d.m]) ? '<details class="whybox"><summary>Why each one failed</summary>'+missing.map(d=>'<div class="ktest bad">'+esc(d.m)+': '+esc(FEEDWHY[d.m]||"not tried this session")+'</div>').join("")+'</details>' : '')
     : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
@@ -3154,10 +3216,11 @@ async function localSweep(){
         HEALTH.station.ok++; HEALTH.station.last = "ok";
         results.forEach(res=>{
           const d = slice.find(x=>FEEDMAP[x.m].url===res.url); if(!d) return;
+          if(!FEEDMAP[d.m].call && FEEDMAP[d.m].paper){ HEALTH.paper = HEALTH.paper || {ok:0,fail:0,items:0}; }
           const items = res.items || (res.ok && res.body && /<(rss|feed|item)[\s>]/i.test(res.body) ? parseRss(res.body) : []);
           if(!items.length){ return; }
           const call = FEEDMAP[d.m].call;
-          const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:baseCall(call), srcUrl:"https://"+hostOf(res.url), desc:it.desc||"", prov:"station"}));
+          const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(FEEDMAP[d.m].paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
           HEALTH.station.items += arts.length;
           ingest(arts, [d.id]);
         });
@@ -3344,13 +3407,32 @@ function build(){
     if(!cls) return;
     let stationDma = null, repCall = null;
     for(const c of s.calls){ if(CALL[c]!=null){ stationDma = CALL[c]; repCall = c; break; } }
-    const pl = placeStory(text + " " + [...s.sources].join(" "), stationDma);
+    /* Gray (and other groups) republish each other's stories. Signs of that: the same headline in
+       more than one station's feed, a group byline, or another market's call sign in the byline.
+       A shared story is placed by the towns it names, and only credited to a station in that market. */
+    const feedCalls = [...s.calls].filter(c=>CALL[c]!=null);
+    const feedMkts = new Set(feedCalls.map(c=>CALL[c]));
+    const groupByline = /\b(Gray News|Gray Media|Gray Washington|Gray DC|InvestigateTV|Nexstar Media Wire|Sinclair|The National Desk|CNN Newsource|Associated Press|\(AP\))\b/i.test(text);
+    let origin = null;
+    (text.match(/\b[KW][A-Z]{2,3}\b/g)||[]).forEach(c=>{ if(origin==null && CALL[c]!=null && !feedCalls.includes(c)) origin = c; });
+    const shared = feedMkts.size>1 || groupByline || origin!=null;
+    s.shared = shared;
+    if(shared){
+      if(origin){ stationDma = CALL[origin]; repCall = origin; }
+      else { stationDma = null; repCall = null; }
+    }
+    const pl = placeStory(text + " " + (shared ? "" : [...s.sources].join(" ")), stationDma);
     let dma = pl.dma;
-    if(dma==null && s.scanDmas.size){
+    /* a feed's own market is only assumed when the story isn't shared */
+    if(dma==null && s.scanDmas.size && !shared){
       const hitCands = pl.cands.filter(c=>s.scanDmas.has(c));
       if(hitCands.length===1) dma = hitCands[0];
     }
-    items.push({s, text, cls, dma, via:pl.via, cands:pl.cands, repCall: dma===stationDma ? repCall : null, tk:toks(s.title)});
+    /* credit: the station that filed it, or for a shared story, whichever of its carriers is in the story's market */
+    let credit = dma===stationDma ? repCall : null;
+    if(shared && !credit && dma!=null){ credit = feedCalls.find(c=>CALL[c]===dma) || null; }
+    const carriers = shared ? feedCalls.filter(c=>c!==credit) : [];
+    items.push({s, text, cls, dma, via:pl.via, cands:pl.cands, repCall: credit, shared, carriers, tk:toks(s.title)});
   });
 
   /* 3. merge differently-worded headlines about the same event, so outlet counts mean something */
@@ -3386,6 +3468,8 @@ function build(){
     /* headline: a local station's if one reported, otherwise the newest */
     const lead = m.find(x=>x.repCall) || m[0];
     const repCall = (m.find(x=>x.repCall)||{}).repCall || null;
+    const carriers = [...new Set([].concat(...m.map(x=>x.carriers||[])))].filter(c=>c!==repCall);
+    const shared = m.some(x=>x.shared);
     const cas = casualties(text);
     const national = [...sources].filter(isNational);
     const outlets = sources.size;
@@ -3424,7 +3508,7 @@ function build(){
     out.push({
       s:{title:lead.s.title, url:lead.s.url, ms, first, sources, provs, orig:lead.s.orig, translated:lead.s.translated, es:lead.s.es},
       cls, dma:c.dma, via:lead.via, cands:lead.cands, repCall, score, ageMin, why,
-      big, bigWhy, old: ageMin > 180, merged:m.length,
+      big, bigWhy, old: ageMin > 180, merged:m.length, shared, carriers,
       id: normKey(lead.s.title), keys: m.map(x=>normKey(x.s.title))
     });
   });
@@ -3603,6 +3687,7 @@ function storyRow(x){
       '<div class="src">'+esc(srcs+more)+'</div>'+bigTag+
       '<details class="whyscore"><summary>Why '+x.score+'</summary>'+(x.why||[]).filter(w=>w.label).map(w=>'<span>'+(w.n>0?"+":"")+w.n+' '+esc(w.label)+'</span>').join("")+'</details>'+
       mkt+(d && natNote(d) ? '<div class="natline">'+esc(natNote(d))+'</div>' : '')+
+      (x.shared && x.carriers && x.carriers.length ? '<div class="why">Shared story — also carried by '+esc(x.carriers.slice(0,4).join(", "))+(x.repCall?'; '+esc(x.repCall)+' is the newsroom in this market':'')+'</div>' : '')+
       '<div class="why">via '+[...x.s.provs].map(p=>esc(PROVIDER_NAMES[p]||p)).join(", ")+(d?' · placed by '+(x.via==="station"?"reporting station":"place name"):"")+
         (d?' <button class="linkbtn plog" data-log="'+esc(x.id)+'">'+(PORTER[x.id]?"Logged for Porter review":"Log for Porter review")+'</button>':'')+'</div>'+
     '</div></article>';
