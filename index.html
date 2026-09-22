@@ -3314,6 +3314,35 @@ function renderFeedCoverage(){
       (missing.length ? '<div class="ktest off">'+missing.length+' use Google\'s local edition instead: '+esc(missing.map(d=>d.m).join(", "))+'</div>' : '')+
       (missing.some(d=>FEEDWHY[d.m]) ? '<details class="whybox"><summary>Why each one failed</summary>'+missing.map(d=>'<div class="ktest bad">'+esc(d.m)+': '+esc(FEEDWHY[d.m]||"not tried this session")+'</div>').join("")+'</details>' : '')
     : '<div class="ktest off">No survey yet. Run it once and every market gets a feed.</div>';
+  if(have){
+    const all = allLocalFeeds();
+    const r2j = DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length;
+    box.innerHTML = '<div class="ktest ok">A local sweep reads '+(all.length+r2j)+' feeds across 210 markets.</div>' + box.innerHTML;
+  }
+}
+/* Every working feed the page knows about, one entry per feed address:
+   each market's main feed (unless it only works through rss2json), every extra station from the
+   tier passes, and any station whose feed was found some other way — the feed tester, direct mode
+   or a fast sweep — which is remembered per site but was never part of the local sweep. */
+function allLocalFeeds(){
+  const reads = [], seen = new Map();
+  /* a site shared by two markets is fetched once but still counted for both */
+  const add = (d, call, paper, url) => {
+    if(!url) return;
+    if(seen.has(url)){ const r = seen.get(url); if(!r.ids.includes(d.id)) r.ids.push(d.id); return; }
+    const r = {d, call, paper, url, ids:[d.id]}; seen.set(url, r); reads.push(r);
+  };
+  DMAS.forEach(d=>{
+    const f = FEEDMAP[d.m];
+    if(f && f.via!=="rss2json") add(d, f.call, f.paper, f.url);
+    if(f) (f.extra||[]).forEach(e=>add(d, e.call, null, e.url));
+    d.all.forEach(st=>{
+      const dom = CALL_DOMAIN[baseCall(st.call)];
+      const fp = dom && FEEDPATH[dom];
+      if(fp && fp.path) add(d, st.call, null, "https://"+dom+fp.path);
+    });
+  });
+  return reads;
 }
 /* the sweep: every market's proven feed in batches of 25, Google local editions for the rest,
    and one Google search on top. */
@@ -3324,12 +3353,7 @@ async function localSweep(){
     await surveyFeeds((r,c,n)=>progress(n,210,"Finding feeds · round "+r+" · "+n+" of 210 markets found"));
   }
   const mapped = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via!=="rss2json");
-  /* every feed to read this sweep: each market's main one, plus the extra stations in the top 50 */
-  const reads = [];
-  mapped.forEach(d=>{
-    reads.push({d, call:FEEDMAP[d.m].call, paper:FEEDMAP[d.m].paper, url:FEEDMAP[d.m].url});
-    (FEEDMAP[d.m].extra||[]).forEach(e=>reads.push({d, call:e.call, url:e.url}));
-  });
+  const reads = allLocalFeeds();
   const viaR2J = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via==="rss2json");
   const unmapped = DMAS.filter(d=>!FEEDMAP[d.m]);
   const jobs = [];
@@ -3353,7 +3377,7 @@ async function localSweep(){
           const call = rd.call;
           const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(rd.paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
           HEALTH.station.items += arts.length;
-          ingest(arts, [d.id]);
+          ingest(arts, rd.ids || [d.id]);
         });
       }catch(e){ HEALTH.station.fail++; HEALTH.station.last = ((e&&e.message)||"failed").slice(0,90); }
       livePaint(); renderHealth();
