@@ -319,6 +319,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     </div>
     <div id="passReport"></div>
     <button class="btn wide" id="worldSurvey">Find a feed for every country</button>
+    <button class="btn wide" id="worldAfrica">Fill African gaps with AllAfrica</button>
     <div id="worldCover"></div>
     <p class="lab" style="margin-top:10px">Every feed being read</p>
     <div id="feedList"></div>
@@ -2100,17 +2101,20 @@ async function fetchFeed(feedUrl){
 }
 function parseRss(xml){
   const doc = new DOMParser().parseFromString(xml,"text/xml");
-  return [...doc.querySelectorAll("item")].map(it=>{
+  const nodes = [...doc.querySelectorAll("item")];
+  if(!nodes.length) nodes.push(...doc.querySelectorAll("entry"));     /* Atom */
+  return nodes.map(it=>{
     const g = t => { const n = it.getElementsByTagName(t)[0]; return n ? n.textContent : ""; };
     const srcEl = it.getElementsByTagName("source")[0];
     let src = srcEl ? srcEl.textContent : (g("News:Source")||g("news:source")||"");
     let srcUrl = srcEl ? (srcEl.getAttribute("url")||"") : "";
-    let link = g("link");
+    let link = g("link") || ((it.getElementsByTagName("link")[0]||{}).getAttribute ? it.getElementsByTagName("link")[0].getAttribute("href") : "") || "";
     const inner = link.match(/[?&]url=([^&]+)/);
     if(/bing\.com/.test(link) && inner){ try{ link = decodeURIComponent(inner[1]); }catch(e){} }
     let desc = g("description").replace(/<[^>]+>/g," ");
     const author = (g("dc:creator")||g("author")||"").replace(/<[^>]+>/g," ").trim();
-    return {title:g("title"), link, date:Date.parse(g("pubDate"))||0, src, srcUrl, desc, author};
+    const when = g("pubDate") || g("dc:date") || g("date") || g("published") || g("updated");
+    return {title:g("title"), link, date:Date.parse(when)||0, src, srcUrl, desc, author};
   });
 }
 function cleanTitle(t, src){
@@ -4069,7 +4073,19 @@ const WORLDFEED_KEY = "ds-hyperlocal-worldfeeds";
 let WORLDFEED = {};        /* iso2 -> {name, url, lang} */
 function worldFeedLoad(){ return storeGet(WORLDFEED_KEY,{}).then(v=>{ WORLDFEED = v||{}; renderWorldCoverage(); }); }
 function worldFeedSave(){ storeSet(WORLDFEED_KEY, WORLDFEED); renderWorldCoverage(); }
-const WORLD_PATHS = ["/feed/","/rss","/rss.xml","/feed","/en/rss","/rssfeeds/","/arc/outboundfeeds/rss/?outputType=xml"];
+/* AllAfrica publishes a headline feed per African country, which covers the countries whose own
+   outlets have no feed or block automated reads. Confirmed pattern: /tools/headlines/rdf/<slug>/headlines.rdf */
+const ALLAFRICA = {DZ:"algeria",AO:"angola",BJ:"benin",BW:"botswana",BF:"burkinafaso",BI:"burundi",CM:"cameroon",CV:"capeverde",
+ CF:"centralafricanrepublic",TD:"chad",KM:"comoros",CG:"congo_brazzaville",CD:"congo_kinshasa",CI:"cotedivoire",DJ:"djibouti",
+ EG:"egypt",GQ:"equatorialguinea",ER:"eritrea",SZ:"swaziland",ET:"ethiopia",GA:"gabon",GM:"gambia",GH:"ghana",GN:"guinea",
+ GW:"guineabissau",KE:"kenya",LS:"lesotho",LR:"liberia",LY:"libya",MG:"madagascar",MW:"malawi",ML:"mali",MR:"mauritania",
+ MU:"mauritius",MA:"morocco",MZ:"mozambique",NA:"namibia",NE:"niger",NG:"nigeria",RW:"rwanda",ST:"saotomeandprincipe",
+ SN:"senegal",SC:"seychelles",SL:"sierraleone",SO:"somalia",ZA:"southafrica",SS:"southsudan",SD:"sudan",TZ:"tanzania",
+ TG:"togo",TN:"tunisia",UG:"uganda",ZM:"zambia",ZW:"zimbabwe"};
+const allAfricaUrl = slug => "https://allafrica.com/tools/headlines/rdf/"+slug+"/headlines.rdf";
+const WORLD_PATHS = ["/feed/","/rss","/rss.xml","/feed","/en/rss","/en/feed/","/rss/news","/news/rss","/rssfeeds/","/feed/rss",
+  "/?feed=rss2","/feeds/posts/default","/rss/all.xml","/rss/index.xml","/arc/outboundfeeds/rss/?outputType=xml",
+  "/search/?q=&t=article&l=25&s=start_time&sd=desc&f=rss"];
 async function surveyWorldFeeds(onProgress){
   if(!PROXY_URL || !BATCH_OK) return 0;
   const todo = Object.keys(WORLD_OUTLETS).filter(iso=>!WORLDFEED[iso]);
@@ -4088,6 +4104,8 @@ async function surveyWorldFeeds(onProgress){
   }
   /* 2. then the usual paths */
   todo.forEach(iso=>WORLD_OUTLETS[iso].o.forEach(([name,dom])=>WORLD_PATHS.forEach(pt=>tryList.push({iso, name, url:"https://"+dom+pt}))));
+  /* 3. AllAfrica as the backstop for African countries */
+  Object.keys(ALLAFRICA).forEach(iso=>{ if(!WORLDFEED[iso]) tryList.push({iso, name:"AllAfrica", url:allAfricaUrl(ALLAFRICA[iso])}); });
   let found = 0;
   for(let i=0;i<tryList.length;i+=25){
     const slice = tryList.slice(i,i+25).filter(x=>!WORLDFEED[x.iso]);
@@ -4102,13 +4120,41 @@ async function surveyWorldFeeds(onProgress){
     });
     onProgress && onProgress("testing feeds · "+Object.keys(WORLDFEED).length+" countries");
   }
+  /* whatever still refuses the worker gets one go through rss2json, which fetches from elsewhere */
+  const stuck = Object.keys(WORLD_OUTLETS).filter(iso=>!WORLDFEED[iso]);
+  for(const iso of stuck){
+    const tries = [];
+    WORLD_OUTLETS[iso].o.forEach(([name,dom])=>WORLD_PATHS.slice(0,4).forEach(pt=>tries.push({name, url:"https://"+dom+pt})));
+    for(const t of tries.slice(0,5)){
+      try{
+        const items = await viaRss2json(t.url);
+        if(items.length){ WORLDFEED[iso] = {name:t.name, url:t.url, lang:WORLD_OUTLETS[iso].l||"en", via:"rss2json", t:Date.now()}; found++; break; }
+      }catch(e){ if(/api key|very short period|available feeds/i.test((e&&e.message)||"")) { onProgress && onProgress("rss2json is capped"); break; } }
+    }
+    onProgress && onProgress("rss2json · "+Object.keys(WORLDFEED).length+" countries");
+  }
   worldFeedSave();
   return found;
 }
 async function readWorldFeeds(){
-  const isos = Object.keys(WORLDFEED);
-  if(!isos.length || !PROXY_URL || !BATCH_OK) return [];
+  const isos = Object.keys(WORLDFEED).filter(i=>WORLDFEED[i].via!=="rss2json");
+  const r2j = Object.keys(WORLDFEED).filter(i=>WORLDFEED[i].via==="rss2json");
+  if((!isos.length && !r2j.length) || !PROXY_URL || !BATCH_OK) return [];
   const out = [];
+  for(const iso of r2j){
+    const f = WORLDFEED[iso];
+    try{
+      let items = (await viaRss2json(f.url)).map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
+      const foreign = items.filter(i=>!looksEnglish(i.title));
+      if(foreign.length){
+        TRANS_FROM = f.lang && f.lang!=="en" ? f.lang : "auto";
+        const fixed = await withTranslation(foreign.map(i=>Object.assign(i,{es:true, orig:i.title})));
+        const byUrl = new Map(fixed.map(i=>[i.url,i]));
+        items = items.map(i=>byUrl.get(i.url)||i);
+      }
+      out.push(...items);
+    }catch(e){}
+  }
   for(let i=0;i<isos.length;i+=25){
     const slice = isos.slice(i,i+25);
     let res = []; try{ res = await proxyBatch(slice.map(iso=>WORLDFEED[iso].url)); }catch(e){ continue; }
@@ -4135,11 +4181,17 @@ async function readWorldFeeds(){
 function renderWorldCoverage(){
   const box = $("worldCover"); if(!box) return;
   const n = Object.keys(WORLDFEED).length, total = Object.keys(WORLD_OUTLETS).length;
+  const missing = Object.keys(WORLD_OUTLETS).filter(i=>!WORLDFEED[i]).map(i=>{
+    const c = COUNTRIES.find(x=>x.i===i); return c ? c.n : i;
+  }).sort();
   box.innerHTML = n
-    ? '<div class="ktest ok">'+n+' of '+total+' countries have a national outlet feed.</div>'
+    ? '<div class="ktest ok">'+n+' of '+total+' countries have a national outlet feed'+
+        (Object.values(WORLDFEED).filter(f=>f.via==="rss2json").length?' ('+Object.values(WORLDFEED).filter(f=>f.via==="rss2json").length+' through rss2json)':'')+'.</div>'+
+      (missing.length ? '<details class="whybox"><summary>'+missing.length+' still missing</summary><div class="ktest off">'+esc(missing.join(", "))+'</div></details>' : '')
     : '<div class="ktest off">No country feeds yet. Run the survey once and each country is read from its own outlet.</div>';
 }
 let WORLD = [];                 /* the stories */
+let worldBusy = false;
 let WORLD_T = 0;                /* when it was last pulled */
 const WORLD_Q_GD = '("air strike" OR missile OR earthquake OR coup OR "state of emergency" OR "plane crash" OR "death toll" OR ceasefire OR evacuated OR "mass casualties" OR protests OR resigned)';
 async function pWorldGoogle(){
@@ -4222,7 +4274,7 @@ function renderWorld(){
       '<details class="whyscore"><summary>Why '+x.score+'</summary>'+x.why.filter(w=>w.label).map(w=>'<span>+'+w.n+' '+esc(w.label)+'</span>').join("")+'</details>'+
       '</div></article>';
   }).join("");
-  $("list").innerHTML = head + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":"Tap Pull world desk")+'</b>Significant stories from 199 countries, rated and placed by country.</div>');
+  $("list").innerHTML = head + '<p class="hint" id="worldNote"></p>' + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":"Tap Pull world desk to start")+'</b>Nothing is fetched until you ask. Significant stories from 199 countries, rated and placed by country.</div>');
 }
 
 /* ================= NATIONAL DESK =================
@@ -4550,6 +4602,29 @@ function init(){
     busy = false; btn.disabled = false; btn.textContent = "Find a feed for every country";
     progress(1,1,"World survey: "+Object.keys(WORLDFEED).length+" of "+Object.keys(WORLD_OUTLETS).length+" countries have their own feed ("+n+" new). Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
   });
+  $("worldAfrica").addEventListener("click",async()=>{
+    if(busy || !PROXY_URL) return;
+    const btn = $("worldAfrica");
+    const gaps = Object.keys(ALLAFRICA).filter(iso=>!WORLDFEED[iso]);
+    if(!gaps.length){ progress(1,1,"Every African country already has a feed."); return; }
+    busy = true; btn.disabled = true; btn.textContent = "Checking "+gaps.length+" countries…"; beginPull();
+    let found = 0;
+    for(let i=0;i<gaps.length;i+=25){
+      const slice = gaps.slice(i,i+25);
+      let res = []; try{ res = await proxyBatch(slice.map(iso=>allAfricaUrl(ALLAFRICA[iso]))); }catch(e){}
+      res.forEach(r=>{
+        const iso = slice.find(x=>allAfricaUrl(ALLAFRICA[x])===r.url); if(!iso) return;
+        if(r.ok && r.body && parseRss(r.body).length){
+          WORLDFEED[iso] = {name:"AllAfrica", url:r.url, lang:"en", t:Date.now(), how:"allafrica"};
+          found++;
+        }
+      });
+      btn.textContent = "found "+found;
+    }
+    worldFeedSave();
+    busy = false; btn.disabled = false; btn.textContent = "Fill African gaps with AllAfrica";
+    progress(1,1,"AllAfrica covered "+found+" more countries. "+Object.keys(WORLDFEED).length+" of "+Object.keys(WORLD_OUTLETS).length+" now have a feed.");
+  });
   $("surveyTop").addEventListener("click",async()=>{
     if(busy) return;
     if(!Object.keys(FEEDMAP).length){ progress(0,1,"Run the main survey first."); return; }
@@ -4769,7 +4844,7 @@ function init(){
   $("vStory").addEventListener("click",()=>{VIEW="story";syncViewButtons();render();});
   $("vMarket").addEventListener("click",()=>{VIEW="market";syncViewButtons();render();});
   $("vPorter").addEventListener("click",()=>{VIEW="porter";syncViewButtons();render();});
-  $("vWorld").addEventListener("click",()=>{ VIEW="world"; syncViewButtons(); render(); if(!WORLD_T) document.querySelector("#worldPull") && $("worldPull").click(); });
+  $("vWorld").addEventListener("click",()=>{ VIEW="world"; syncViewButtons(); render(); });
   $("copyRun").addEventListener("click",e=>copyText(VIEW==="porter"?porterText():rundownText(), e.currentTarget));
   $("slotsNow").addEventListener("click",()=>{
     SLOT_ON.clear();
@@ -4794,8 +4869,14 @@ function init(){
     const lg = e.target.closest(".plog");
     if(lg){ logStory(lg.dataset.log); return; }
     if(e.target.id==="worldPull"){
-      const b = e.target; b.disabled = true; b.textContent = "Pulling…";
-      loadWorld().then(()=>renderWorld(), ()=>{ b.disabled=false; b.textContent="Pull world desk"; });
+      if(worldBusy) return;
+      const b = e.target;
+      worldBusy = true; b.disabled = true; b.textContent = "Pulling…";
+      const note = $("worldNote"); if(note) note.textContent = "Reading country feeds, GDELT and Google's world edition…";
+      loadWorld().then(
+        ()=>{ worldBusy = false; renderWorld(); },
+        e2=>{ worldBusy = false; b.disabled = false; b.textContent = "Pull world desk";
+              if(note) note.textContent = "That pull failed: "+((e2&&e2.message)||"no sources answered"); });
       return;
     }
     if(e.target.id==="clearF"){ clearFilters(); return; }
