@@ -112,6 +112,9 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .eslang{background:#8c7ae6;color:#0f1c2e;font-family:var(--body);font-size:11.5px;font-weight:700;border-radius:3px;padding:1px 5px;vertical-align:middle}
 .esorig{font-size:13px;color:var(--dim);font-style:italic;margin:-2px 0 4px}
 .dimtxt{color:var(--dim);font-weight:400}
+.worldbar{display:flex;gap:12px;align-items:center;margin-bottom:10px;font-size:13px;color:var(--dim)}
+.worldbar input[type=range]{width:140px;vertical-align:middle}
+.worldbar select{background:var(--row);border:1px solid var(--line);border-radius:4px;padding:5px}
 .whybox summary{cursor:pointer;font-size:12.5px;color:var(--dim);margin-top:4px}
 .errline{grid-column:1 / -1;font-size:12px;color:#ff9d97;word-break:break-word;margin:-1px 0 4px}
 .ktest{font-size:12.5px;margin:4px 0;word-break:break-word}
@@ -336,6 +339,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <div class="views" role="group" aria-label="View">
       <button id="vStory" aria-pressed="true">By story</button>
       <button id="vMarket" aria-pressed="false">By market</button>
+      <button id="vWorld" aria-pressed="false">World</button>
       <button id="vPorter" aria-pressed="false">Porter log</button>
     </div>
     <button class="btn" id="copyRun">Copy rundown</button>
@@ -3865,7 +3869,8 @@ function render(){
                     'The relays answered earlier, so they are probably rate-limiting you. Wait a minute and sweep again.')+'</div>'
     : "";
 
-  if(VIEW==="porter"){ renderPorter(); }
+  if(VIEW==="world"){ renderWorld(); }
+  else if(VIEW==="porter"){ renderPorter(); }
   else if(!lastRun){ /* keep the welcome block */ }
   else if(!placed.length){
     $("list").innerHTML = '<div class="empty"><b>Quiet across the placed markets</b>'+(STORIES.length?"Loosen the filters or check the unplaced list below.":"Nothing passed the breaking-news test in the last three hours. Try a deep scan on a state.")+'</div>';
@@ -3891,7 +3896,7 @@ function render(){
     }).join("");
   }
   renderFilters();
-  $("unplacedBox").hidden = !unplaced.length || VIEW==="porter";
+  $("unplacedBox").hidden = !unplaced.length || VIEW==="porter" || VIEW==="world";
   $("unplacedSum").textContent = unplaced.length+" stor"+(unplaced.length===1?"y":"ies")+" couldn't be placed in a market";
   $("unplaced").innerHTML = unplaced.slice(0,60).map(storyRow).join("");
 }
@@ -3964,6 +3969,156 @@ function porterText(){
     if(e.notes) lines.push("  Notes: "+e.notes);
     return lines.join("\n");
   }).join("\n\n");
+}
+
+/* ================= WORLD DESK =================
+   Significant news from anywhere, placed by country. Separate from the US board: different
+   sources, its own rating, its own view. 199 countries with their capitals, demonyms and main
+   cities, so a headline can be tied to a place without naming the country. */
+const COUNTRIES = [{"n":"Afghanistan","i":"AF","c":"Asia","cap":"Kabul","d":"Afghan","a":["Kandahar","Herat"]},{"n":"Albania","i":"AL","c":"Europe","cap":"Tirana","d":"Albanian","a":[]},{"n":"Algeria","i":"DZ","c":"Africa","cap":"Algiers","d":"Algerian","a":["Oran"]},{"n":"Andorra","i":"AD","c":"Europe","cap":"Andorra la Vella","d":"","a":[]},{"n":"Angola","i":"AO","c":"Africa","cap":"Luanda","d":"Angolan","a":[]},{"n":"Antigua and Barbuda","i":"AG","c":"Americas","cap":"St. John's","d":"","a":["Antigua"]},{"n":"Argentina","i":"AR","c":"Americas","cap":"Buenos Aires","d":"Argentine","a":["Argentinian","Cordoba","Rosario"]},{"n":"Armenia","i":"AM","c":"Asia","cap":"Yerevan","d":"Armenian","a":[]},{"n":"Australia","i":"AU","c":"Oceania","cap":"Canberra","d":"Australian","a":["Sydney","Melbourne","Brisbane","Perth","Adelaide","Hobart","Darwin","Gold Coast","Newcastle","Wollongong"]},{"n":"Austria","i":"AT","c":"Europe","cap":"Vienna","d":"Austrian","a":["Salzburg","Graz"]},{"n":"Azerbaijan","i":"AZ","c":"Asia","cap":"Baku","d":"Azerbaijani","a":[]},{"n":"Bahamas","i":"BS","c":"Americas","cap":"Nassau","d":"Bahamian","a":[]},{"n":"Bahrain","i":"BH","c":"Asia","cap":"Manama","d":"Bahraini","a":[]},{"n":"Bangladesh","i":"BD","c":"Asia","cap":"Dhaka","d":"Bangladeshi","a":["Chittagong"]},{"n":"Barbados","i":"BB","c":"Americas","cap":"Bridgetown","d":"Barbadian","a":[]},{"n":"Belarus","i":"BY","c":"Europe","cap":"Minsk","d":"Belarusian","a":[]},{"n":"Belgium","i":"BE","c":"Europe","cap":"Brussels","d":"Belgian","a":["Antwerp","Liege"]},{"n":"Belize","i":"BZ","c":"Americas","cap":"Belmopan","d":"Belizean","a":[]},{"n":"Benin","i":"BJ","c":"Africa","cap":"Porto-Novo","d":"Beninese","a":["Cotonou"]},{"n":"Bhutan","i":"BT","c":"Asia","cap":"Thimphu","d":"Bhutanese","a":[]},{"n":"Bolivia","i":"BO","c":"Americas","cap":"La Paz","d":"Bolivian","a":["Santa Cruz","Sucre"]},{"n":"Bosnia and Herzegovina","i":"BA","c":"Europe","cap":"Sarajevo","d":"Bosnian","a":["Bosnia"]},{"n":"Botswana","i":"BW","c":"Africa","cap":"Gaborone","d":"Botswanan","a":[]},{"n":"Brazil","i":"BR","c":"Americas","cap":"Brasilia","d":"Brazilian","a":["Sao Paulo","Rio de Janeiro","Salvador","Recife","Belo Horizonte"]},{"n":"Brunei","i":"BN","c":"Asia","cap":"Bandar Seri Begawan","d":"Bruneian","a":[]},{"n":"Bulgaria","i":"BG","c":"Europe","cap":"Sofia","d":"Bulgarian","a":[]},{"n":"Burkina Faso","i":"BF","c":"Africa","cap":"Ouagadougou","d":"Burkinabe","a":[]},{"n":"Burundi","i":"BI","c":"Africa","cap":"Gitega","d":"Burundian","a":["Bujumbura"]},{"n":"Cambodia","i":"KH","c":"Asia","cap":"Phnom Penh","d":"Cambodian","a":["Siem Reap"]},{"n":"Cameroon","i":"CM","c":"Africa","cap":"Yaounde","d":"Cameroonian","a":["Douala"]},{"n":"Canada","i":"CA","c":"Americas","cap":"Ottawa","d":"Canadian","a":["Toronto","Montreal","Vancouver","Calgary","Edmonton","Winnipeg","Quebec City","Halifax"]},{"n":"Cape Verde","i":"CV","c":"Africa","cap":"Praia","d":"","a":["Cabo Verde"]},{"n":"Central African Republic","i":"CF","c":"Africa","cap":"Bangui","d":"","a":[]},{"n":"Chad","i":"TD","c":"Africa","cap":"N'Djamena","d":"Chadian","a":[]},{"n":"Chile","i":"CL","c":"Americas","cap":"Santiago","d":"Chilean","a":["Valparaiso"]},{"n":"China","i":"CN","c":"Asia","cap":"Beijing","d":"Chinese","a":["Shanghai","Shenzhen","Guangzhou","Chengdu","Wuhan","Tianjin","Chongqing","Xinjiang","Tibet"]},{"n":"Colombia","i":"CO","c":"Americas","cap":"Bogota","d":"Colombian","a":["Medellin","Cali","Cartagena"]},{"n":"Comoros","i":"KM","c":"Africa","cap":"Moroni","d":"","a":[]},{"n":"Congo","i":"CG","c":"Africa","cap":"Brazzaville","d":"","a":["Republic of the Congo"]},{"n":"Democratic Republic of the Congo","i":"CD","c":"Africa","cap":"Kinshasa","d":"Congolese","a":["DR Congo","DRC","Goma","Lubumbashi"]},{"n":"Costa Rica","i":"CR","c":"Americas","cap":"San Jose","d":"Costa Rican","a":[]},{"n":"Croatia","i":"HR","c":"Europe","cap":"Zagreb","d":"Croatian","a":["Split","Dubrovnik"]},{"n":"Cuba","i":"CU","c":"Americas","cap":"Havana","d":"Cuban","a":[]},{"n":"Cyprus","i":"CY","c":"Europe","cap":"Nicosia","d":"Cypriot","a":[]},{"n":"Czech Republic","i":"CZ","c":"Europe","cap":"Prague","d":"Czech","a":["Czechia","Brno"]},{"n":"Denmark","i":"DK","c":"Europe","cap":"Copenhagen","d":"Danish","a":["Aarhus"]},{"n":"Djibouti","i":"DJ","c":"Africa","cap":"Djibouti","d":"","a":[]},{"n":"Dominica","i":"DM","c":"Americas","cap":"Roseau","d":"","a":[]},{"n":"Dominican Republic","i":"DO","c":"Americas","cap":"Santo Domingo","d":"Dominican","a":["Punta Cana"]},{"n":"Ecuador","i":"EC","c":"Americas","cap":"Quito","d":"Ecuadorian","a":["Guayaquil"]},{"n":"Egypt","i":"EG","c":"Africa","cap":"Cairo","d":"Egyptian","a":["Alexandria","Giza","Sinai"]},{"n":"El Salvador","i":"SV","c":"Americas","cap":"San Salvador","d":"Salvadoran","a":[]},{"n":"Equatorial Guinea","i":"GQ","c":"Africa","cap":"Malabo","d":"","a":[]},{"n":"Eritrea","i":"ER","c":"Africa","cap":"Asmara","d":"Eritrean","a":[]},{"n":"Estonia","i":"EE","c":"Europe","cap":"Tallinn","d":"Estonian","a":[]},{"n":"Eswatini","i":"SZ","c":"Africa","cap":"Mbabane","d":"","a":["Swaziland"]},{"n":"Ethiopia","i":"ET","c":"Africa","cap":"Addis Ababa","d":"Ethiopian","a":["Tigray","Amhara"]},{"n":"Fiji","i":"FJ","c":"Oceania","cap":"Suva","d":"Fijian","a":[]},{"n":"Finland","i":"FI","c":"Europe","cap":"Helsinki","d":"Finnish","a":[]},{"n":"France","i":"FR","c":"Europe","cap":"Paris","d":"French","a":["Marseille","Lyon","Toulouse","Nice","Bordeaux","Corsica"]},{"n":"Gabon","i":"GA","c":"Africa","cap":"Libreville","d":"Gabonese","a":[]},{"n":"Gambia","i":"GM","c":"Africa","cap":"Banjul","d":"Gambian","a":[]},{"n":"Georgia","i":"GE","c":"Asia","cap":"Tbilisi","d":"Georgian","a":[]},{"n":"Germany","i":"DE","c":"Europe","cap":"Berlin","d":"German","a":["Munich","Hamburg","Frankfurt","Cologne","Stuttgart","Dusseldorf"]},{"n":"Ghana","i":"GH","c":"Africa","cap":"Accra","d":"Ghanaian","a":["Kumasi"]},{"n":"Greece","i":"GR","c":"Europe","cap":"Athens","d":"Greek","a":["Thessaloniki","Crete","Rhodes"]},{"n":"Grenada","i":"GD","c":"Americas","cap":"St. George's","d":"","a":[]},{"n":"Guatemala","i":"GT","c":"Americas","cap":"Guatemala City","d":"Guatemalan","a":[]},{"n":"Guinea","i":"GN","c":"Africa","cap":"Conakry","d":"Guinean","a":[]},{"n":"Guinea-Bissau","i":"GW","c":"Africa","cap":"Bissau","d":"","a":[]},{"n":"Guyana","i":"GY","c":"Americas","cap":"Georgetown","d":"Guyanese","a":[]},{"n":"Haiti","i":"HT","c":"Americas","cap":"Port-au-Prince","d":"Haitian","a":[]},{"n":"Honduras","i":"HN","c":"Americas","cap":"Tegucigalpa","d":"Honduran","a":["San Pedro Sula"]},{"n":"Hungary","i":"HU","c":"Europe","cap":"Budapest","d":"Hungarian","a":[]},{"n":"Iceland","i":"IS","c":"Europe","cap":"Reykjavik","d":"Icelandic","a":[]},{"n":"India","i":"IN","c":"Asia","cap":"New Delhi","d":"Indian","a":["Mumbai","Delhi","Bengaluru","Bangalore","Kolkata","Chennai","Hyderabad","Kashmir","Kerala","Punjab"]},{"n":"Indonesia","i":"ID","c":"Asia","cap":"Jakarta","d":"Indonesian","a":["Bali","Surabaya","Sumatra","Java","Papua","Sulawesi"]},{"n":"Iran","i":"IR","c":"Asia","cap":"Tehran","d":"Iranian","a":["Isfahan","Shiraz","Mashhad"]},{"n":"Iraq","i":"IQ","c":"Asia","cap":"Baghdad","d":"Iraqi","a":["Mosul","Basra","Erbil","Kurdistan"]},{"n":"Ireland","i":"IE","c":"Europe","cap":"Dublin","d":"Irish","a":["Cork","Galway","Limerick"]},{"n":"Israel","i":"IL","c":"Asia","cap":"Jerusalem","d":"Israeli","a":["Tel Aviv","Haifa","Gaza border"]},{"n":"Italy","i":"IT","c":"Europe","cap":"Rome","d":"Italian","a":["Milan","Naples","Turin","Venice","Florence","Sicily","Genoa"]},{"n":"Ivory Coast","i":"CI","c":"Africa","cap":"Yamoussoukro","d":"Ivorian","a":["Abidjan","Cote d'Ivoire"]},{"n":"Jamaica","i":"JM","c":"Americas","cap":"Kingston","d":"Jamaican","a":["Montego Bay"]},{"n":"Japan","i":"JP","c":"Asia","cap":"Tokyo","d":"Japanese","a":["Osaka","Kyoto","Nagoya","Fukuoka","Sapporo","Hokkaido","Okinawa"]},{"n":"Jordan","i":"JO","c":"Asia","cap":"Amman","d":"Jordanian","a":[]},{"n":"Kazakhstan","i":"KZ","c":"Asia","cap":"Astana","d":"Kazakh","a":["Almaty"]},{"n":"Kenya","i":"KE","c":"Africa","cap":"Nairobi","d":"Kenyan","a":["Mombasa"]},{"n":"Kiribati","i":"KI","c":"Oceania","cap":"Tarawa","d":"","a":[]},{"n":"Kosovo","i":"XK","c":"Europe","cap":"Pristina","d":"","a":[]},{"n":"Kuwait","i":"KW","c":"Asia","cap":"Kuwait City","d":"Kuwaiti","a":[]},{"n":"Kyrgyzstan","i":"KG","c":"Asia","cap":"Bishkek","d":"Kyrgyz","a":[]},{"n":"Laos","i":"LA","c":"Asia","cap":"Vientiane","d":"Laotian","a":[]},{"n":"Latvia","i":"LV","c":"Europe","cap":"Riga","d":"Latvian","a":[]},{"n":"Lebanon","i":"LB","c":"Asia","cap":"Beirut","d":"Lebanese","a":["Tripoli, Lebanon"]},{"n":"Lesotho","i":"LS","c":"Africa","cap":"Maseru","d":"","a":[]},{"n":"Liberia","i":"LR","c":"Africa","cap":"Monrovia","d":"Liberian","a":[]},{"n":"Libya","i":"LY","c":"Africa","cap":"Tripoli","d":"Libyan","a":["Benghazi","Derna"]},{"n":"Liechtenstein","i":"LI","c":"Europe","cap":"Vaduz","d":"","a":[]},{"n":"Lithuania","i":"LT","c":"Europe","cap":"Vilnius","d":"Lithuanian","a":[]},{"n":"Luxembourg","i":"LU","c":"Europe","cap":"Luxembourg City","d":"","a":[]},{"n":"Madagascar","i":"MG","c":"Africa","cap":"Antananarivo","d":"Malagasy","a":[]},{"n":"Malawi","i":"MW","c":"Africa","cap":"Lilongwe","d":"Malawian","a":["Blantyre"]},{"n":"Malaysia","i":"MY","c":"Asia","cap":"Kuala Lumpur","d":"Malaysian","a":["Penang","Johor","Sabah","Sarawak"]},{"n":"Maldives","i":"MV","c":"Asia","cap":"Male","d":"","a":[]},{"n":"Mali","i":"ML","c":"Africa","cap":"Bamako","d":"Malian","a":["Timbuktu"]},{"n":"Malta","i":"MT","c":"Europe","cap":"Valletta","d":"Maltese","a":[]},{"n":"Marshall Islands","i":"MH","c":"Oceania","cap":"Majuro","d":"","a":[]},{"n":"Mauritania","i":"MR","c":"Africa","cap":"Nouakchott","d":"Mauritanian","a":[]},{"n":"Mauritius","i":"MU","c":"Africa","cap":"Port Louis","d":"","a":[]},{"n":"Mexico","i":"MX","c":"Americas","cap":"Mexico City","d":"Mexican","a":["Guadalajara","Monterrey","Tijuana","Cancun","Acapulco","Juarez","Sinaloa","Michoacan"]},{"n":"Micronesia","i":"FM","c":"Oceania","cap":"Palikir","d":"","a":[]},{"n":"Moldova","i":"MD","c":"Europe","cap":"Chisinau","d":"Moldovan","a":[]},{"n":"Monaco","i":"MC","c":"Europe","cap":"Monaco","d":"","a":[]},{"n":"Mongolia","i":"MN","c":"Asia","cap":"Ulaanbaatar","d":"Mongolian","a":[]},{"n":"Montenegro","i":"ME","c":"Europe","cap":"Podgorica","d":"Montenegrin","a":[]},{"n":"Morocco","i":"MA","c":"Africa","cap":"Rabat","d":"Moroccan","a":["Casablanca","Marrakech","Tangier","Agadir"]},{"n":"Mozambique","i":"MZ","c":"Africa","cap":"Maputo","d":"Mozambican","a":["Cabo Delgado"]},{"n":"Myanmar","i":"MM","c":"Asia","cap":"Naypyidaw","d":"Burmese","a":["Burma","Yangon","Mandalay","Rakhine"]},{"n":"Namibia","i":"NA","c":"Africa","cap":"Windhoek","d":"Namibian","a":[]},{"n":"Nauru","i":"NR","c":"Oceania","cap":"Yaren","d":"","a":[]},{"n":"Nepal","i":"NP","c":"Asia","cap":"Kathmandu","d":"Nepali","a":["Everest"]},{"n":"Netherlands","i":"NL","c":"Europe","cap":"Amsterdam","d":"Dutch","a":["Rotterdam","The Hague","Utrecht","Eindhoven"]},{"n":"New Zealand","i":"NZ","c":"Oceania","cap":"Wellington","d":"New Zealander","a":["Auckland","Christchurch","Dunedin","Queenstown"]},{"n":"Nicaragua","i":"NI","c":"Americas","cap":"Managua","d":"Nicaraguan","a":[]},{"n":"Niger","i":"NE","c":"Africa","cap":"Niamey","d":"Nigerien","a":[]},{"n":"Nigeria","i":"NG","c":"Africa","cap":"Abuja","d":"Nigerian","a":["Lagos","Kano","Ibadan","Port Harcourt","Borno"]},{"n":"North Korea","i":"KP","c":"Asia","cap":"Pyongyang","d":"North Korean","a":["DPRK"]},{"n":"North Macedonia","i":"MK","c":"Europe","cap":"Skopje","d":"Macedonian","a":[]},{"n":"Norway","i":"NO","c":"Europe","cap":"Oslo","d":"Norwegian","a":["Bergen","Tromso"]},{"n":"Oman","i":"OM","c":"Asia","cap":"Muscat","d":"Omani","a":[]},{"n":"Pakistan","i":"PK","c":"Asia","cap":"Islamabad","d":"Pakistani","a":["Karachi","Lahore","Peshawar","Quetta","Balochistan"]},{"n":"Palau","i":"PW","c":"Oceania","cap":"Ngerulmud","d":"","a":[]},{"n":"Palestine","i":"PS","c":"Asia","cap":"Ramallah","d":"Palestinian","a":["Gaza","Gaza Strip","West Bank","Rafah","Khan Younis"]},{"n":"Panama","i":"PA","c":"Americas","cap":"Panama City","d":"Panamanian","a":[]},{"n":"Papua New Guinea","i":"PG","c":"Oceania","cap":"Port Moresby","d":"","a":["PNG"]},{"n":"Paraguay","i":"PY","c":"Americas","cap":"Asuncion","d":"Paraguayan","a":[]},{"n":"Peru","i":"PE","c":"Americas","cap":"Lima","d":"Peruvian","a":["Cusco","Arequipa"]},{"n":"Philippines","i":"PH","c":"Asia","cap":"Manila","d":"Filipino","a":["Cebu","Davao","Mindanao","Luzon","Quezon City"]},{"n":"Poland","i":"PL","c":"Europe","cap":"Warsaw","d":"Polish","a":["Krakow","Gdansk","Wroclaw","Poznan"]},{"n":"Portugal","i":"PT","c":"Europe","cap":"Lisbon","d":"Portuguese","a":["Porto","Madeira","Algarve"]},{"n":"Qatar","i":"QA","c":"Asia","cap":"Doha","d":"Qatari","a":[]},{"n":"Romania","i":"RO","c":"Europe","cap":"Bucharest","d":"Romanian","a":["Cluj"]},{"n":"Russia","i":"RU","c":"Europe","cap":"Moscow","d":"Russian","a":["St Petersburg","Saint Petersburg","Siberia","Kazan","Sochi","Dagestan","Chechnya","Belgorod","Kursk"]},{"n":"Rwanda","i":"RW","c":"Africa","cap":"Kigali","d":"Rwandan","a":[]},{"n":"Saint Kitts and Nevis","i":"KN","c":"Americas","cap":"Basseterre","d":"","a":[]},{"n":"Saint Lucia","i":"LC","c":"Americas","cap":"Castries","d":"","a":[]},{"n":"Saint Vincent and the Grenadines","i":"VC","c":"Americas","cap":"Kingstown","d":"","a":[]},{"n":"Samoa","i":"WS","c":"Oceania","cap":"Apia","d":"Samoan","a":[]},{"n":"San Marino","i":"SM","c":"Europe","cap":"San Marino","d":"","a":[]},{"n":"Sao Tome and Principe","i":"ST","c":"Africa","cap":"Sao Tome","d":"","a":[]},{"n":"Saudi Arabia","i":"SA","c":"Asia","cap":"Riyadh","d":"Saudi","a":["Jeddah","Mecca","Medina"]},{"n":"Senegal","i":"SN","c":"Africa","cap":"Dakar","d":"Senegalese","a":[]},{"n":"Serbia","i":"RS","c":"Europe","cap":"Belgrade","d":"Serbian","a":["Novi Sad"]},{"n":"Seychelles","i":"SC","c":"Africa","cap":"Victoria, Seychelles","d":"","a":[]},{"n":"Sierra Leone","i":"SL","c":"Africa","cap":"Freetown","d":"","a":[]},{"n":"Singapore","i":"SG","c":"Asia","cap":"Singapore","d":"Singaporean","a":[]},{"n":"Slovakia","i":"SK","c":"Europe","cap":"Bratislava","d":"Slovak","a":[]},{"n":"Slovenia","i":"SI","c":"Europe","cap":"Ljubljana","d":"Slovenian","a":[]},{"n":"Solomon Islands","i":"SB","c":"Oceania","cap":"Honiara","d":"","a":[]},{"n":"Somalia","i":"SO","c":"Africa","cap":"Mogadishu","d":"Somali","a":["Puntland","Somaliland"]},{"n":"South Africa","i":"ZA","c":"Africa","cap":"Pretoria","d":"South African","a":["Johannesburg","Cape Town","Durban","Soweto"]},{"n":"South Korea","i":"KR","c":"Asia","cap":"Seoul","d":"South Korean","a":["Busan","Incheon","Daegu"]},{"n":"South Sudan","i":"SS","c":"Africa","cap":"Juba","d":"","a":[]},{"n":"Spain","i":"ES","c":"Europe","cap":"Madrid","d":"Spanish","a":["Barcelona","Valencia","Seville","Malaga","Bilbao","Canary Islands","Majorca"]},{"n":"Sri Lanka","i":"LK","c":"Asia","cap":"Colombo","d":"Sri Lankan","a":["Kandy"]},{"n":"Sudan","i":"SD","c":"Africa","cap":"Khartoum","d":"Sudanese","a":["Darfur","Omdurman"]},{"n":"Suriname","i":"SR","c":"Americas","cap":"Paramaribo","d":"","a":[]},{"n":"Sweden","i":"SE","c":"Europe","cap":"Stockholm","d":"Swedish","a":["Gothenburg","Malmo"]},{"n":"Switzerland","i":"CH","c":"Europe","cap":"Bern","d":"Swiss","a":["Zurich","Geneva","Basel","Lausanne"]},{"n":"Syria","i":"SY","c":"Asia","cap":"Damascus","d":"Syrian","a":["Aleppo","Homs","Idlib","Latakia"]},{"n":"Taiwan","i":"TW","c":"Asia","cap":"Taipei","d":"Taiwanese","a":["Kaohsiung"]},{"n":"Tajikistan","i":"TJ","c":"Asia","cap":"Dushanbe","d":"Tajik","a":[]},{"n":"Tanzania","i":"TZ","c":"Africa","cap":"Dodoma","d":"Tanzanian","a":["Dar es Salaam","Zanzibar"]},{"n":"Thailand","i":"TH","c":"Asia","cap":"Bangkok","d":"Thai","a":["Phuket","Chiang Mai","Pattaya"]},{"n":"Timor-Leste","i":"TL","c":"Asia","cap":"Dili","d":"","a":["East Timor"]},{"n":"Togo","i":"TG","c":"Africa","cap":"Lome","d":"Togolese","a":[]},{"n":"Tonga","i":"TO","c":"Oceania","cap":"Nuku'alofa","d":"Tongan","a":[]},{"n":"Trinidad and Tobago","i":"TT","c":"Americas","cap":"Port of Spain","d":"","a":["Trinidad"]},{"n":"Tunisia","i":"TN","c":"Africa","cap":"Tunis","d":"Tunisian","a":["Sfax"]},{"n":"Turkey","i":"TR","c":"Asia","cap":"Ankara","d":"Turkish","a":["Istanbul","Izmir","Antalya","Turkiye"]},{"n":"Turkmenistan","i":"TM","c":"Asia","cap":"Ashgabat","d":"Turkmen","a":[]},{"n":"Tuvalu","i":"TV","c":"Oceania","cap":"Funafuti","d":"","a":[]},{"n":"Uganda","i":"UG","c":"Africa","cap":"Kampala","d":"Ugandan","a":[]},{"n":"Ukraine","i":"UA","c":"Europe","cap":"Kyiv","d":"Ukrainian","a":["Kharkiv","Odesa","Odessa","Lviv","Donetsk","Mariupol","Zaporizhzhia","Dnipro","Crimea"]},{"n":"United Arab Emirates","i":"AE","c":"Asia","cap":"Abu Dhabi","d":"Emirati","a":["Dubai","UAE","Sharjah"]},{"n":"United Kingdom","i":"GB","c":"Europe","cap":"London","d":"British","a":["England","Scotland","Wales","Northern Ireland","Manchester","Birmingham, UK","Glasgow","Edinburgh","Liverpool","Belfast","Cardiff","Leeds","Bristol, UK"]},{"n":"Uruguay","i":"UY","c":"Americas","cap":"Montevideo","d":"Uruguayan","a":[]},{"n":"Uzbekistan","i":"UZ","c":"Asia","cap":"Tashkent","d":"Uzbek","a":["Samarkand"]},{"n":"Vanuatu","i":"VU","c":"Oceania","cap":"Port Vila","d":"","a":[]},{"n":"Vatican City","i":"VA","c":"Europe","cap":"Vatican City","d":"","a":["Holy See","the Vatican"]},{"n":"Venezuela","i":"VE","c":"Americas","cap":"Caracas","d":"Venezuelan","a":["Maracaibo"]},{"n":"Vietnam","i":"VN","c":"Asia","cap":"Hanoi","d":"Vietnamese","a":["Ho Chi Minh City","Saigon","Da Nang"]},{"n":"Yemen","i":"YE","c":"Asia","cap":"Sanaa","d":"Yemeni","a":["Aden","Hodeidah","Houthi"]},{"n":"Zambia","i":"ZM","c":"Africa","cap":"Lusaka","d":"Zambian","a":[]},{"n":"Zimbabwe","i":"ZW","c":"Africa","cap":"Harare","d":"Zimbabwean","a":["Bulawayo"]},{"n":"Hong Kong","i":"HK","c":"Asia","cap":"Hong Kong","d":"","a":[]},{"n":"Puerto Rico","i":"PR","c":"Americas","cap":"San Juan, Puerto Rico","d":"Puerto Rican","a":[]},{"n":"Greenland","i":"GL","c":"Americas","cap":"Nuuk","d":"","a":[]}];
+/* regions people name instead of the country */
+const CTRY_REGIONS = {
+  "Australia":["Queensland","New South Wales","NSW","Tasmania","Northern Territory","Western Australia","South Australia","Outback"],
+  "Canada":["Ontario","Quebec","Alberta","British Columbia","Saskatchewan","Manitoba","Nova Scotia","Newfoundland","Yukon","Nunavut"],
+  "India":["Uttar Pradesh","Maharashtra","Bihar","Tamil Nadu","Gujarat","Rajasthan","Assam","Odisha","Manipur"],
+  "China":["Guangdong","Sichuan","Henan","Yunnan","Inner Mongolia","Hong Kong island"],
+  "Brazil":["Amazonas","Bahia","Minas Gerais","Rio Grande do Sul","the Amazon"],
+  "Indonesia":["Aceh","West Papua","Borneo"],
+  "Russia":["Rostov","Kamchatka","Vladivostok","Volgograd"],
+  "Germany":["Bavaria","Saxony","North Rhine-Westphalia"],
+  "Spain":["Catalonia","Andalusia","Valencia region","Galicia"],
+  "Italy":["Lombardy","Tuscany","Calabria","Naples region"],
+  "France":["Normandy","Brittany","Provence"],
+  "Philippines":["Visayas","Bicol"],
+  "Nigeria":["Kaduna","Zamfara","Niger Delta"],
+  "South Africa":["KwaZulu-Natal","Eastern Cape","Gauteng"],
+  "Mexico":["Chiapas","Guerrero","Oaxaca","Jalisco","Sonora","Tamaulipas"],
+  "Japan":["Kyushu","Honshu","Tohoku","Noto"],
+  "New Zealand":["South Island","North Island"],
+  "Pakistan":["Sindh","Punjab province","Khyber Pakhtunkhwa","Gilgit"],
+  "United Kingdom":["Yorkshire","Cornwall","the Midlands","Merseyside"]
+};
+const CTRY_GAZ = [];
+COUNTRIES.forEach((c,idx)=>{
+  const names = [c.n].concat(c.a||[], CTRY_REGIONS[c.n]||[]);
+  if(c.cap) names.push(c.cap);
+  if(c.d) names.push(c.d);
+  names.forEach(n=>{
+    if(!n) return;
+    CTRY_GAZ.push({idx, name:n, len:n.length, re:new RegExp("(^|[^A-Za-z])"+reEsc(n)+"(?![A-Za-z])","i")});
+  });
+});
+CTRY_GAZ.sort((a,b)=>b.len-a.len);
+const CTRY_FLAG = c => c.i.replace(/./g, ch=>String.fromCodePoint(127397+ch.charCodeAt(0)));
+/* longest name wins, so "South Korea" beats "Korea" and "Guinea-Bissau" beats "Guinea" */
+function placeCountry(text){
+  let masked = " "+text+" ", hits = [];
+  for(const g of CTRY_GAZ){
+    const m = masked.match(g.re);
+    if(!m) continue;
+    hits.push(g.idx);
+    const start = m.index + m[1].length;
+    masked = masked.slice(0,start) + " ".repeat(g.name.length) + masked.slice(start+g.name.length);
+  }
+  return [...new Set(hits)];
+}
+/* what counts as significant, and how much */
+const WORLD_RULES = [
+ {id:"war", label:"War / military", pts:34, re:/\b(air ?strike|missile (strike|attack|barrage)|shelling|offensive|invasion|incursion|drone (strike|attack)|ceasefire|truce|front line|captured the (city|town)|mobilisation|mobilization|war crimes?)\b/i},
+ {id:"attack", label:"Attack / terror", pts:33, re:/\b(bomb(ing|er)?|suicide attack|car bomb|gunmen|militants|terror attack|hostage|mass shooting|stabbing spree|assassinat\w+|kidnapp\w+)\b/i},
+ {id:"upheaval", label:"Political upheaval", pts:31, re:/\b(coup|ousted|impeach\w*|resign(s|ed|ation)|state of emergency|martial law|dissolv(es|ed) parliament|snap election|no[- ]confidence|seizes power|junta|sworn in as (president|prime minister))\b/i},
+ {id:"disaster", label:"Natural disaster", pts:30, re:/\b(earthquake|magnitude \d|tsunami|volcan\w+|erupt\w+|cyclone|typhoon|hurricane|landslide|mudslide|avalanche|wildfire|bushfire|flash flood|floods?|drought|famine)\b/i},
+ {id:"crash", label:"Transport disaster", pts:29, re:/\b((plane|jet|airliner|aircraft|helicopter|cargo plane) (crash\w*|down|missing)|crash\w* (shortly )?after take ?off|train (derail\w*|crash\w*|collision)|derailment|ferry (sank|sink\w*|capsiz\w*)|boat capsiz\w*|migrant boat|bus plunge|pile-?up)\b/i},
+ {id:"leader", label:"Leader / figure", pts:28, re:/\b((president|prime minister|king|queen|pope|chancellor|dictator|monarch|leader) .{0,20}(dies|dead|death|assassinated|shot|hospitalised|hospitalized)|state funeral|lies in state)\b/i},
+ {id:"unrest", label:"Unrest / protest", pts:26, re:/\b(riot(s|ing)?|mass protests?|demonstrations|crackdown|curfew|clashes|tear gas|general strike|uprising|looting)\b/i},
+ {id:"nuclear", label:"Nuclear / escalation", pts:32, re:/\b(nuclear (test|weapon|strike|threat|plant)|ballistic missile|icbm|uranium enrich\w+|radiation leak|reactor)\b/i},
+ {id:"health", label:"Outbreak / health", pts:26, re:/\b(outbreak|epidemic|pandemic|ebola|cholera|bird flu|h5n1|measles outbreak|quarantine|who declares)\b/i},
+ {id:"economy", label:"Economy / markets", pts:22, re:/\b(currency (collapse|crash)|default(s|ed)? on|bailout|hyperinflation|markets? (plunge|crash|tumble)|central bank (emergency|raises|cuts)|sanctions|trade war|tariffs?)\b/i},
+ {id:"diplomacy", label:"Diplomacy", pts:20, re:/\b(summit|peace (deal|talks|agreement)|treaty|recalls? (its )?ambassador|expels? diplomats|un security council|emergency meeting|deal signed)\b/i},
+ {id:"justice", label:"Courts / inquiry", pts:18, re:/\b(convicted|sentenced to|war crimes court|icc|international court|verdict|inquiry finds|tribunal)\b/i}
+];
+const WORLD_NOT = /\b(recipe|celebrity|royal wedding|fashion|box office|transfer window|premier league|la liga|world cup qualifier|horoscope|review|opinion|column|sponsored|gift guide|betting|odds)\b/i;
+function classifyWorld(text){
+  if(WORLD_NOT.test(text)) return null;
+  const hits = WORLD_RULES.filter(r=>r.re.test(text));
+  if(!hits.length) return null;
+  hits.sort((a,b)=>b.pts-a.pts);
+  return {rule:hits[0], second:hits[1]||null};
+}
+let WORLD = [];                 /* the stories */
+let WORLD_T = 0;                /* when it was last pulled */
+const WORLD_Q_GD = '("air strike" OR missile OR earthquake OR coup OR "state of emergency" OR "plane crash" OR "death toll" OR ceasefire OR evacuated OR "mass casualties" OR protests OR resigned)';
+async function pWorldGoogle(){
+  const u = "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en";
+  const items = await fetchFeed(u);
+  return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
+}
+async function loadWorld(){
+  const got = [].concat(...await Promise.all([
+    run("gdelt",()=>pGdelt(WORLD_Q_GD,"24h")).catch(()=>[]),
+    run("google",()=>pWorldGoogle()).catch(()=>[])
+  ]));
+  const byKey = new Map();
+  const now = Date.now();
+  got.forEach(a=>{
+    if(!a.title || !a.ms || now-a.ms > 24*3600e3) return;
+    const k = normKey(a.title);
+    if(!k) return;
+    let s = byKey.get(k);
+    if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set()}; byKey.set(k,s); }
+    s.ms = Math.max(s.ms,a.ms);
+    if(a.source) s.sources.add(a.source.trim());
+    s.texts.add(a.title+" "+(a.desc||""));
+  });
+  const out = [];
+  byKey.forEach(s=>{
+    const text = [...s.texts].join(" ");
+    const cls = classifyWorld(text);
+    if(!cls) return;
+    const cs = placeCountry(text);
+    const cas = casualties(text);
+    const ageMin = (now - s.ms)/60000;
+    const why = [];
+    const add = (n,l)=>{ if(n) why.push({n:Math.round(n), label:l}); };
+    add(cls.rule.pts*1.5, cls.rule.label);
+    add(ageMin<=60 ? 18 : ageMin<=180 ? 12 : ageMin<=360 ? 7 : 3, ageMin<=60?"within the hour":ageMin<=180?"within three hours":ageMin<=360?"within six hours":"today");
+    add(Math.min(15,(s.sources.size-1)*3), s.sources.size+" outlets");
+    add(cas.killed>=100 ? 24 : cas.killed>=10 ? 16 : cas.killed>=2 ? 9 : cas.killed>=1 ? 4 : 0, cas.killed?cas.killed+" killed":"");
+    if(cas.injured>=20) add(5, cas.injured+" hurt");
+    if(cls.second) add(4, "more than one kind of event");
+    if(cs.length>1) add(4, "crosses "+cs.length+" countries");
+    let score = Math.max(1, Math.min(99, Math.round(why.reduce((a,b)=>a+b.n,0))));
+    out.push({s, cls, countries:cs, score, ageMin, why, cas});
+  });
+  out.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
+  WORLD = out; WORLD_T = Date.now();
+  return out;
+}
+function renderWorld(){
+  const min = +($("worldMin")||{value:0}).value || 0;
+  const cont = ($("worldCont")||{value:"all"}).value || "all";
+  const list = WORLD.filter(x=>{
+    if(x.score < min) return false;
+    if(cont!=="all" && !x.countries.some(i=>COUNTRIES[i].c===cont)) return false;
+    return true;
+  });
+  const head = '<div class="topbar"><h2>World desk</h2><span class="sum">'+(WORLD_T?list.length+" stories · pulled "+new Date(WORLD_T).toLocaleTimeString("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"})+" Sydney":"not pulled yet")+'</span>'+
+    '<button class="btn" id="worldPull">'+(WORLD_T?"Pull again":"Pull world desk")+'</button></div>'+
+    '<div class="worldbar"><label>Minimum <input type="range" id="worldMin" min="0" max="80" step="5" value="'+min+'"></label>'+
+    '<select id="worldCont"><option value="all">Everywhere</option>'+["Africa","Americas","Asia","Europe","Oceania"].map(c=>'<option value="'+c+'"'+(cont===c?" selected":"")+'>'+c+'</option>').join("")+'</select></div>';
+  const rows = list.slice(0,120).map(x=>{
+    const names = x.countries.map(i=>CTRY_FLAG(COUNTRIES[i])+" "+COUNTRIES[i].n);
+    return '<article class="story '+heat(x.score)+'">'+
+      '<div class="score"><b>'+x.score+'</b><span>world<br>rating</span></div><div>'+
+      '<div class="meta"><span class="cat">'+esc(x.cls.rule.label)+'</span><span>'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+
+        (x.cas.killed?'<span class="fresh">'+x.cas.killed+' killed</span>':'')+'</div>'+
+      '<h3 class="hl"><a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
+      '<div class="src">'+esc([...x.s.sources].slice(0,4).join(", "))+'</div>'+
+      '<div class="mkt">'+(names.length?'<span class="name">'+esc(names.join(" · "))+'</span>':'<span class="unsure">no country named</span>')+'</div>'+
+      '<details class="whyscore"><summary>Why '+x.score+'</summary>'+x.why.filter(w=>w.label).map(w=>'<span>+'+w.n+' '+esc(w.label)+'</span>').join("")+'</details>'+
+      '</div></article>';
+  }).join("");
+  $("list").innerHTML = head + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":"Tap Pull world desk")+'</b>Significant stories from 199 countries, rated and placed by country.</div>');
 }
 
 /* ================= NATIONAL DESK =================
@@ -4150,7 +4305,7 @@ async function copyText(txt, btn){
   setTimeout(()=>{ btn.textContent = was; }, 1600);
 }
 function syncViewButtons(){
-  [["vStory","story"],["vMarket","market"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
+  [["vStory","story"],["vMarket","market"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
 }
 
 function syncRatingChips(){
@@ -4502,6 +4657,7 @@ function init(){
   $("vStory").addEventListener("click",()=>{VIEW="story";syncViewButtons();render();});
   $("vMarket").addEventListener("click",()=>{VIEW="market";syncViewButtons();render();});
   $("vPorter").addEventListener("click",()=>{VIEW="porter";syncViewButtons();render();});
+  $("vWorld").addEventListener("click",()=>{ VIEW="world"; syncViewButtons(); render(); if(!WORLD_T) document.querySelector("#worldPull") && $("worldPull").click(); });
   $("copyRun").addEventListener("click",e=>copyText(VIEW==="porter"?porterText():rundownText(), e.currentTarget));
   $("slotsNow").addEventListener("click",()=>{
     SLOT_ON.clear();
@@ -4525,6 +4681,11 @@ function init(){
     }
     const lg = e.target.closest(".plog");
     if(lg){ logStory(lg.dataset.log); return; }
+    if(e.target.id==="worldPull"){
+      const b = e.target; b.disabled = true; b.textContent = "Pulling…";
+      loadWorld().then(()=>renderWorld(), ()=>{ b.disabled=false; b.textContent="Pull world desk"; });
+      return;
+    }
     if(e.target.id==="clearF"){ clearFilters(); return; }
     if(e.target.id==="natCheck"){
       e.target.textContent = "Checking…";
@@ -4537,7 +4698,11 @@ function init(){
       if(confirm("Remove this story from the Porter log?")){ delete PORTER[id]; porterSave(); render(); }
     }
   });
+  document.querySelector("main").addEventListener("input",e=>{
+    if(e.target.id==="worldMin" || e.target.id==="worldCont") renderWorld();
+  });
   document.querySelector("main").addEventListener("change",e=>{
+    if(e.target.id==="worldCont"){ renderWorld(); return; }
     const card = e.target.closest(".plog-card"); if(!card) return;
     const entry = PORTER[card.dataset.id]; if(!entry) return;
     if(e.target.classList.contains("pnotes")){ entry.notes = e.target.value; porterSave(); return; }
