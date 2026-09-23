@@ -4210,14 +4210,10 @@ async function pWorldGoogle(){
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
 }
 async function loadWorld(){
+  /* country outlets only: each story comes from a newsroom in the country it is about */
   const note = m => { const n = $("worldNote"); if(n) n.textContent = m; };
-  const parts = await Promise.all([
-    run("gdelt",()=>pGdelt(WORLD_Q_GD,"24h")).catch(()=>[]).then(r=>{ note("GDELT in, reading country feeds…"); return r; }),
-    run("google",()=>pWorldGoogle()).catch(()=>[]),
-    readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[])
-  ]);
+  const got = await readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[]);
   note("");
-  const got = [].concat(...parts);
   const byKey = new Map();
   const now = Date.now();
   got.forEach(a=>{
@@ -4287,7 +4283,7 @@ function renderWorld(){
       '<details class="whyscore"><summary>Why '+x.score+'</summary>'+x.why.filter(w=>w.label).map(w=>'<span>+'+w.n+' '+esc(w.label)+'</span>').join("")+'</details>'+
       '</div></article>';
   }).join("");
-  $("list").innerHTML = head + '<p class="hint" id="worldNote"></p>' + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":"Tap Pull world desk to start")+'</b>Nothing is fetched until you ask. Significant stories from 199 countries, rated and placed by country.</div>');
+  $("list").innerHTML = head + '<p class="hint" id="worldNote"></p>' + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":(Object.keys(WORLDFEED).length?"Tap Pull world desk to start":"No country feeds yet"))+'</b>'+(Object.keys(WORLDFEED).length?"Read straight from "+Object.keys(WORLDFEED).length+" countries' own newsrooms. Nothing is fetched until you ask.":"Run \"Find a feed for every country\" in the sidebar first — the world desk reads each country's own newsroom, nothing else.")+'</div>');
 }
 
 /* ================= NATIONAL DESK =================
