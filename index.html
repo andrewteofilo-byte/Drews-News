@@ -320,6 +320,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <div id="passReport"></div>
     <button class="btn wide" id="worldSurvey">Find a feed for every country</button>
     <button class="btn wide" id="worldAfrica">Fill African gaps with AllAfrica</button>
+    <button class="btn wide" id="wireSurvey">Check the wires and regional feeds</button>
     <div id="worldCover"></div>
     <p class="lab" style="margin-top:10px">Every feed being read</p>
     <div id="feedList"></div>
@@ -1822,7 +1823,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {wire:"Wires and regionals",world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -3746,7 +3747,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -4177,8 +4178,8 @@ async function readWorldFeeds(onBatch){
       const f = WORLDFEED[iso];
       /* only the newest few from each country: enough for a world desk, a fraction of the work */
       parseRss(r.body)
-        .filter(it=>it.date && Date.now()-it.date < 24*3600e3)
-        .sort((a,b)=>b.date-a.date).slice(0,12)
+        .filter(it=>it.date && Date.now()-it.date < WORLD_WINDOW*3600e3)
+        .sort((a,b)=>b.date-a.date).slice(0, WORLD_PER_COUNTRY)
         .forEach(it=>out.push({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
     });
     done += slice.length;
@@ -4193,17 +4194,88 @@ async function readWorldFeeds(onBatch){
 }
 function renderWorldCoverage(){
   const box = $("worldCover"); if(!box) return;
+  const wireLine = Object.keys(WIRES).length
+    ? '<div class="ktest ok">'+Object.keys(WIRES).length+' of '+WORLD_WIRES.length+' wires and regional feeds working: '+esc(Object.keys(WIRES).join(", "))+'</div>'
+    : '<div class="ktest off">Wires not checked yet: Al Jazeera, DW, France 24, BBC World, UN News, ReliefWeb and the Pacific, Caribbean, Balkan, Caucasus and Central Asia feeds.</div>';
   const n = Object.keys(WORLDFEED).length, total = Object.keys(WORLD_OUTLETS).length;
   const missing = Object.keys(WORLD_OUTLETS).filter(i=>!WORLDFEED[i]).map(i=>{
     const c = COUNTRIES.find(x=>x.i===i); return c ? c.n : i;
   }).sort();
-  box.innerHTML = n
+  box.innerHTML = wireLine + (n
     ? '<div class="ktest ok">'+n+' of '+total+' countries have a national outlet feed'+
         (Object.values(WORLDFEED).filter(f=>f.via==="rss2json").length?' ('+Object.values(WORLDFEED).filter(f=>f.via==="rss2json").length+' through rss2json)':'')+'.</div>'+
       (missing.length ? '<details class="whybox"><summary>'+missing.length+' still missing</summary><div class="ktest off">'+esc(missing.join(", "))+'</div></details>' : '')
-    : '<div class="ktest off">No country feeds yet. Run the survey once and each country is read from its own outlet.</div>';
+    : '<div class="ktest off">No country feeds yet. Run the survey once and each country is read from its own outlet.</div>');
+}
+/* Wires and regional aggregators: not tied to one country, so their stories are placed purely by
+   what they name. They add speed, corroboration (which lifts a story's rating) and the countries
+   whose own outlets have no feed. AP is absent on purpose: they stopped publishing public RSS. */
+const WORLD_WIRES = [
+  ["Al Jazeera", ["https://www.aljazeera.com/xml/rss/all.xml"]],
+  ["Deutsche Welle", ["https://rss.dw.com/rdf/rss-en-all","https://rss.dw.com/xml/rss-en-all"]],
+  ["France 24", ["https://www.france24.com/en/rss"]],
+  ["BBC World", ["https://feeds.bbci.co.uk/news/world/rss.xml"]],
+  ["UN News", ["https://news.un.org/feed/subscribe/en/news/all/rss.xml"]],
+  ["ReliefWeb", ["https://reliefweb.int/updates/rss.xml"]],
+  ["RNZ Pacific", ["https://www.rnz.co.nz/rss/pacific.xml"]],
+  ["Islands Business", ["https://islandsbusiness.com/feed/"]],
+  ["Caribbean News Global", ["https://www.caribbeannewsglobal.com/feed/"]],
+  ["Balkan Insight", ["https://balkaninsight.com/feed/"]],
+  ["OC Media", ["https://oc-media.org/feed/"]],
+  ["Eurasianet", ["https://eurasianet.org/rss.xml"]]
+];
+const WIRE_KEY = "ds-hyperlocal-wires";
+let WIRES = {};      /* name -> url that worked */
+function wiresLoad(){ return storeGet(WIRE_KEY,{}).then(v=>{ WIRES = v||{}; renderWorldCoverage(); }); }
+async function surveyWires(onProgress){
+  if(!PROXY_URL || !BATCH_OK) return 0;
+  const tries = [];
+  WORLD_WIRES.forEach(([name,urls])=>{ if(!WIRES[name]) urls.forEach(u=>tries.push({name, url:u})); });
+  /* and each one's homepage, in case those addresses have moved */
+  WORLD_WIRES.forEach(([name,urls])=>{ if(!WIRES[name]) tries.push({name, url:"https://"+hostOf(urls[0])+"/", home:true}); });
+  let found = 0;
+  for(let i=0;i<tries.length;i+=25){
+    const slice = tries.slice(i,i+25).filter(x=>!WIRES[x.name]);
+    if(!slice.length) continue;
+    let res = []; try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){}
+    const extra = [];
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || WIRES[job.name] || !r.body) return;
+      if(job.home){ feedLinksIn(r.body, job.url).forEach(u=>extra.push({name:job.name, url:u})); return; }
+      if(r.ok && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){ WIRES[job.name] = r.url; found++; }
+    });
+    if(extra.length){
+      let res2 = []; try{ res2 = await proxyBatch(extra.slice(0,25).map(x=>x.url)); }catch(e){}
+      res2.forEach(r=>{
+        const job = extra.find(x=>x.url===r.url); if(!job || WIRES[job.name]) return;
+        if(r.ok && r.body && parseRss(r.body).length){ WIRES[job.name] = r.url; found++; }
+      });
+    }
+    onProgress && onProgress("checking wires · "+Object.keys(WIRES).length+" working");
+  }
+  storeSet(WIRE_KEY, WIRES); renderWorldCoverage();
+  return found;
+}
+async function readWires(){
+  const names = Object.keys(WIRES);
+  if(!names.length || !PROXY_URL || !BATCH_OK) return [];
+  let res = [];
+  try{ res = await proxyBatch(names.map(n=>WIRES[n])); }catch(e){ return []; }
+  const out = [];
+  res.forEach(r=>{
+    const name = names.find(n=>WIRES[n]===r.url); if(!name || !r.ok || !r.body) return;
+    parseRss(r.body)
+      .filter(it=>it.date && Date.now()-it.date < WORLD_WINDOW*3600e3)
+      .sort((a,b)=>b.date-a.date).slice(0,40)
+      .forEach(it=>out.push({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:name, srcUrl:"https://"+hostOf(WIRES[name]), desc:it.desc||""}));
+  });
+  HEALTH.wire = HEALTH.wire || {ok:0,fail:0,items:0};
+  HEALTH.wire.ok++; HEALTH.wire.items += out.length; renderHealth();
+  return out;
 }
 let WORLD = [];                 /* the stories */
+let WORLD_WINDOW = 24;          /* hours of world news to keep */
+const WORLD_PER_COUNTRY = 25;   /* newest stories taken from each country's feed */
 let worldBusy = false;
 let WORLD_T = 0;                /* when it was last pulled */
 const WORLD_Q_GD = '("air strike" OR missile OR earthquake OR coup OR "state of emergency" OR "plane crash" OR "death toll" OR ceasefire OR evacuated OR "mass casualties" OR protests OR resigned)';
@@ -4237,7 +4309,8 @@ async function loadWorld(){
 async function gatherWorld(note){
   return [].concat(...await Promise.all([
     readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[]),
-    run("google",()=>pWorldGoogle()).catch(()=>[])
+    run("google",()=>pWorldGoogle()).catch(()=>[]),
+    readWires().catch(()=>[])
   ]));
 }
 /* the newest foreign headlines only, and never more than 15 seconds spent on them */
@@ -4257,7 +4330,7 @@ function buildWorld(got){
   const byKey = new Map();
   const now = Date.now();
   got.forEach(a=>{
-    if(!a.title || !a.ms || now-a.ms > 24*3600e3) return;
+    if(!a.title || !a.ms || now-a.ms > WORLD_WINDOW*3600e3) return;
     const k = normKey(a.title);
     if(!k) return;
     let s = byKey.get(k);
@@ -4285,7 +4358,8 @@ function buildWorld(got){
     const why = [];
     const add = (n,l)=>{ if(n) why.push({n:Math.round(n), label:l}); };
     add(cls.rule.pts*1.5, cls.rule.label);
-    add(ageMin<=60 ? 18 : ageMin<=180 ? 12 : ageMin<=360 ? 7 : 3, ageMin<=60?"within the hour":ageMin<=180?"within three hours":ageMin<=360?"within six hours":"today");
+    add(ageMin<=60 ? 18 : ageMin<=180 ? 14 : ageMin<=360 ? 10 : ageMin<=720 ? 6 : 3,
+        ageMin<=60?"within the hour":ageMin<=180?"within three hours":ageMin<=360?"within six hours":ageMin<=720?"within twelve hours":"within the day");
     add(Math.min(15,(s.sources.size-1)*3), s.sources.size+" outlets");
     add(cas.killed>=100 ? 24 : cas.killed>=10 ? 16 : cas.killed>=2 ? 9 : cas.killed>=1 ? 4 : 0, cas.killed?cas.killed+" killed":"");
     if(cas.injured>=20) add(5, cas.injured+" hurt");
@@ -4306,9 +4380,10 @@ function renderWorld(){
     if(cont!=="all" && !x.countries.some(i=>COUNTRIES[i].c===cont)) return false;
     return true;
   });
-  const head = '<div class="topbar"><h2>World desk</h2><span class="sum">'+(WORLD_T?list.length+" stories · pulled "+new Date(WORLD_T).toLocaleTimeString("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"})+" Sydney":"not pulled yet")+'</span>'+
+  const head = '<div class="topbar"><h2>World desk</h2><span class="sum">'+(WORLD_T?list.length+" stories · last "+WORLD_WINDOW+" hours · pulled "+new Date(WORLD_T).toLocaleTimeString("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"})+" Sydney":"not pulled yet")+'</span>'+
     '<button class="btn" id="worldPull">'+(WORLD_T?"Pull again":"Pull world desk")+'</button></div>'+
     '<div class="worldbar"><label>Minimum <input type="range" id="worldMin" min="0" max="80" step="5" value="'+min+'"></label>'+
+    '<select id="worldWin">'+[[6,"Last 6 hours"],[12,"Last 12 hours"],[24,"Last 24 hours"],[48,"Last 48 hours"]].map(o=>'<option value="'+o[0]+'"'+(WORLD_WINDOW===o[0]?" selected":"")+'>'+o[1]+'</option>').join("")+'</select>'+
     '<select id="worldCont"><option value="all">Everywhere</option>'+["Africa","Americas","Asia","Europe","Oceania"].map(c=>'<option value="'+c+'"'+(cont===c?" selected":"")+'>'+c+'</option>').join("")+'</select></div>';
   const rows = list.slice(0,120).map(x=>{
     const names = x.countries.map(i=>CTRY_FLAG(COUNTRIES[i])+" "+COUNTRIES[i].n);
@@ -4650,6 +4725,14 @@ function init(){
     busy = false; btn.disabled = false; btn.textContent = "Find a feed for every country";
     progress(1,1,"World survey: "+Object.keys(WORLDFEED).length+" of "+Object.keys(WORLD_OUTLETS).length+" countries have their own feed ("+n+" new). Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
   });
+  $("wireSurvey").addEventListener("click",async()=>{
+    if(busy || !PROXY_URL) return;
+    const btn = $("wireSurvey");
+    busy = true; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    const n = await surveyWires(msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Check the wires and regional feeds";
+    progress(1,1, Object.keys(WIRES).length+" of "+WORLD_WIRES.length+" wires and regional feeds working ("+n+" new).");
+  });
   $("worldAfrica").addEventListener("click",async()=>{
     if(busy || !PROXY_URL) return;
     const btn = $("worldAfrica");
@@ -4943,6 +5026,15 @@ function init(){
   });
   document.querySelector("main").addEventListener("change",e=>{
     if(e.target.id==="worldCont"){ renderWorld(); return; }
+    if(e.target.id==="worldWin"){
+      const was = WORLD_WINDOW;
+      WORLD_WINDOW = +e.target.value;
+      filtersSave();
+      /* a wider window needs a fresh pull; a narrower one can just be re-filtered */
+      if(WORLD_WINDOW > was && WORLD_T){ const b = $("worldPull"); if(b) b.click(); }
+      else renderWorld();
+      return;
+    }
     const card = e.target.closest(".plog-card"); if(!card) return;
     const entry = PORTER[card.dataset.id]; if(!entry) return;
     if(e.target.classList.contains("pnotes")){ entry.notes = e.target.value; porterSave(); return; }
@@ -4975,6 +5067,7 @@ function init(){
     if(typeof f.spanish==="boolean"){ USE_SPANISH=f.spanish; $("useSpanish").checked=f.spanish; }
     if(typeof f.direct==="boolean"){ DIRECT_MODE=f.direct; $("directMode").checked=f.direct; }
     if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
+    if(f.worldWin) WORLD_WINDOW = +f.worldWin;
     if(typeof f.localMode==="boolean"){ LOCAL_MODE=f.localMode; $("localMode").checked=f.localMode; setBusy(false); }
     if(f.size && SIZE_TEST[f.size]){ SIZE=f.size; $("size").value=f.size; }
     if(f.sort && SORTS[f.sort]){ SORT=f.sort; $("sort").value=f.sort; }
@@ -4990,7 +5083,7 @@ function init(){
     Object.values(PORTER).forEach(e=>{ if(NAME_MIGRATE[e.market]) e.market = NAME_MIGRATE[e.market]; });
     refreshRegionList(); updateTargets(); build(); render();
   });
-  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad();
+  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad(); wiresLoad();
   keysLoad().then(()=>{
     ["newsdata","currents","gnews","rss2json"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
     renderHealth();
