@@ -2101,7 +2101,14 @@ async function fetchFeed(feedUrl){
   }
 }
 function parseRss(xml){
-  const doc = new DOMParser().parseFromString(xml,"text/xml");
+  let doc = new DOMParser().parseFromString(xml,"text/xml");
+  /* plenty of real feeds carry a raw & in a link, which makes the XML invalid. Escape the stray
+     ones and try again rather than throwing the whole feed away. */
+  if(doc.querySelector("parsererror")){
+    const fixed = xml.replace(/&(?!(#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]{1,8});)/g, "&amp;");
+    const retry = new DOMParser().parseFromString(fixed,"text/xml");
+    if(!retry.querySelector("parsererror")) doc = retry;
+  }
   const nodes = [...doc.querySelectorAll("item")];
   if(!nodes.length) nodes.push(...doc.querySelectorAll("entry"));     /* Atom */
   return nodes.map(it=>{
@@ -4107,7 +4114,11 @@ const ALLAFRICA = {DZ:"algeria",AO:"angola",BJ:"benin",BW:"botswana",BF:"burkina
  SN:"senegal",SC:"seychelles",SL:"sierraleone",SO:"somalia",ZA:"southafrica",SS:"southsudan",SD:"sudan",TZ:"tanzania",
  TG:"togo",TN:"tunisia",UG:"uganda",ZM:"zambia",ZW:"zimbabwe"};
 const allAfricaUrl = slug => "https://allafrica.com/tools/headlines/rdf/"+slug+"/headlines.rdf";
-const WORLD_PATHS = ["/feed/","/rss","/rss.xml","/feed","/en/rss","/en/feed/","/rss/news","/news/rss","/rssfeeds/","/feed/rss",
+/* Addresses known to work for outlets whose feed isn't at a guessable path — ABC Australia hides
+   its behind a numeric id, El Pais uses a long one, Vanuatu's Daily Post is on BLOX, and so on.
+   Tried first for those countries; anything wrong here simply fails the test. */
+const WORLD_DIRECT = {"AU":["https://www.abc.net.au/news/feed/51120/rss.xml","https://www.sbs.com.au/news/feed","https://www.news.com.au/content-feeds/latest-news-national/"],"NZ":["https://www.rnz.co.nz/rss/national.xml","https://www.nzherald.co.nz/arc/outboundfeeds/rss/?outputType=xml"],"GB":["https://feeds.bbci.co.uk/news/rss.xml","https://www.theguardian.com/uk/rss","https://news.sky.com/feeds/rss/home.xml"],"ES":["https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada","https://www.20minutos.es/rss/"],"RU":["https://www.themoscowtimes.com/rss/news","https://meduza.io/rss/en/all","https://tass.com/rss/v2.xml"],"KR":["https://en.yna.co.kr/RSS/news.xml","https://www.koreaherald.com/rss/newsAll.xml"],"TW":["https://focustaiwan.tw/rss/news","https://www.taipeitimes.com/xml/index.rss"],"TH":["https://www.bangkokpost.com/rss/data/most-recent.xml","https://www.nationthailand.com/rss"],"MY":["https://www.thestar.com.my/rss/news","https://www.malaymail.com/feed/rss"],"TR":["https://www.hurriyetdailynews.com/rss","https://www.dailysabah.com/rss/homepage"],"GR":["https://www.ekathimerini.com/feed/","https://greekreporter.com/feed/"],"PT":["https://www.publico.pt/rss","https://observador.pt/feed/"],"CH":["https://www.swissinfo.ch/service/rss/all/rss.xml","https://www.thelocal.ch/feeds/rss.php"],"FI":["https://feeds.yle.fi/uutiset/v1/majorHeadlines/YLE_NEWS.rss","https://www.helsinkitimes.fi/?format=feed&type=rss"],"LT":["https://www.lrt.lt/en/rss","https://www.delfi.lt/rss/feeds/daily.xml"],"SI":["https://www.total-slovenia-news.com/feed","https://www.rtvslo.si/feeds/00.xml"],"BG":["https://www.novinite.com/services/news_rdf.php","https://sofiaglobe.com/feed/"],"AL":["https://albaniandailynews.com/rss","https://exit.al/en/feed/"],"AM":["https://armenpress.am/eng/rss/news/","https://news.am/eng/rss/"],"GE":["https://civil.ge/feed","https://agenda.ge/rss"],"BY":["https://eng.belta.by/rss","https://belsat.eu/en/feed/"],"BE":["https://www.brusselstimes.com/feed","https://www.vrt.be/vrtnws/en.rss.articles.xml"],"BZ":["https://www.breakingbelizenews.com/feed/","https://amandala.com.bz/feed/"],"BT":["https://kuenselonline.com/feed/","https://thebhutanese.bt/feed/"],"BO":["https://eju.tv/feed/","https://www.la-razon.com/feed/"],"BN":["https://borneobulletin.com.bn/feed/"],"KH":["https://www.khmertimeskh.com/feed/","https://cambodianess.com/feed"],"CL":["https://www.latercera.com/feed/","https://www.biobiochile.cl/rss/"],"CO":["https://www.eltiempo.com/rss/colombia.xml","https://www.elespectador.com/arcio/rss/"],"DM":["https://dominicanewsonline.com/feed/"],"SZ":["https://www.times.co.sz/feed/","https://eswatinifinancialtimes.co.sz/feed/"],"FJ":["https://www.fijitimes.com.fj/feed/","https://fijivillage.com/feed/"],"GL":["https://knr.gl/en/rss.xml","https://sermitsiaq.ag/rss"],"GY":["https://www.stabroeknews.com/feed/","https://newsroom.gy/feed/"],"HN":["https://proceso.hn/feed/","https://www.laprensa.hn/rss/"],"IQ":["https://www.rudaw.net/rss/english","https://shafaq.com/en/rss","https://www.kurdistan24.net/en/rss"],"JM":["https://jamaica-gleaner.com/feed/rss.xml","https://www.jamaicaobserver.com/feed/"],"JO":["https://jordantimes.com/rss.xml","https://en.royanews.tv/rss"],"KW":["https://kuwaittimes.com/feed/","https://www.arabtimesonline.com/news/feed/"],"LA":["https://laotiantimes.com/feed/"],"LB":["https://www.naharnet.com/rss/news","https://today.lorientlejour.com/feed"],"LI":["https://www.volksblatt.li/feed","https://www.vaterland.li/rss"],"MT":["https://timesofmalta.com/rss","https://www.maltatoday.com.mt/rss"],"MC":["https://www.monacotribune.com/feed/"],"MN":["https://montsame.mn/en/rss","https://news.mn/feed/"],"MM":["https://www.irrawaddy.com/feed","https://www.mizzima.com/feed"],"NI":["https://confidencial.digital/feed/","https://www.laprensani.com/feed/"],"OM":["https://timesofoman.com/rss","https://www.muscatdaily.com/feed/"],"PE":["https://larepublica.pe/rss/","https://elcomercio.pe/arcio/rss/"],"KN":["https://www.thestkittsnevisobserver.com/feed/","https://zizonline.com/feed/"],"WS":["https://www.samoaobserver.ws/feed","https://samoaglobalnews.com/feed/"],"SB":["https://www.solomonstarnews.com/feed/","https://www.sibconline.com.sb/feed/"],"LK":["https://www.adaderana.lk/rss.php","https://www.dailymirror.lk/rss"],"TT":["https://newsday.co.tt/feed/","https://www.guardian.co.tt/feed"],"TM":["https://turkmenportal.com/rss","https://en.turkmenistan.gov.tm/rss"],"VU":["https://www.dailypost.vu/search/?q=&t=article&l=25&s=start_time&sd=desc&f=rss"],"VA":["https://www.vaticannews.va/en.rss.xml"],"BS":["https://ewnews.com/feed","https://thenassauguardian.com/feed/"],"BH":["https://www.newsofbahrain.com/rss","https://www.gdnonline.com/rss"],"KI":["https://www.kiribatinewstoday.com/feed/"],"NR":["https://www.nauru.news/feed/"],"BW":["https://www.mmegi.bw/feed"],"CU":["https://oncubanews.com/feed/","https://en.granma.cu/rss"]};
+const WORLD_PATHS = ["/index.xml","/feed/","/rss","/rss.xml","/feed","/en/rss","/en/feed/","/rss/news","/news/rss","/rssfeeds/","/feed/rss",
   "/?feed=rss2","/feeds/posts/default","/rss/all.xml","/rss/index.xml","/arc/outboundfeeds/rss/?outputType=xml",
   "/search/?q=&t=article&l=25&s=start_time&sd=desc&f=rss"];
 async function surveyWorldFeeds(onProgress){
@@ -4126,7 +4137,8 @@ async function surveyWorldFeeds(onProgress){
     });
     onProgress && onProgress("reading homepages "+Math.min(i+25,pages.length)+" of "+pages.length);
   }
-  /* 2. then the usual paths */
+  /* 2. addresses we already know, then the usual paths */
+  todo.forEach(iso=>(WORLD_DIRECT[iso]||[]).forEach(u=>tryList.unshift({iso, name:(WORLD_OUTLETS[iso].o[0]||["?"])[0], url:u})));
   todo.forEach(iso=>WORLD_OUTLETS[iso].o.forEach(([name,dom])=>WORLD_PATHS.forEach(pt=>tryList.push({iso, name, url:"https://"+dom+pt}))));
   /* 3. AllAfrica as the backstop for African countries */
   Object.keys(ALLAFRICA).forEach(iso=>{ if(!WORLDFEED[iso]) tryList.push({iso, name:"AllAfrica", url:allAfricaUrl(ALLAFRICA[iso])}); });
