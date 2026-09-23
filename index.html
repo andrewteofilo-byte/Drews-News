@@ -1823,7 +1823,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {wire:"Wires and regionals",world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {gapfill:"Google country editions",wire:"Wires and regionals",world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -4078,10 +4078,11 @@ const WORLD_RULES = [
  {id:"war", label:"War / military", pts:34, re:/\b(air ?strike|missile (strike|attack|barrage)|shelling|offensive|invasion|incursion|drone (strike|attack)|ceasefire|truce|front line|captured the (city|town)|mobilisation|mobilization|war crimes?)\b/i},
  {id:"attack", label:"Attack / terror", pts:33, re:/\b(bomb(ing|er)?|suicide attack|car bomb|gunmen|militants|terror attack|hostage|mass shooting|stabbing spree|assassinat\w+|kidnapp\w+)\b/i},
  {id:"upheaval", label:"Political upheaval", pts:31, re:/\b(coup|ousted|impeach\w*|resign(s|ed|ation)|state of emergency|martial law|dissolv(es|ed) parliament|snap election|no[- ]confidence|seizes power|junta|sworn in as (president|prime minister))\b/i},
- {id:"disaster", label:"Natural disaster", pts:30, re:/\b(earthquake|magnitude \d|tsunami|volcan\w+|erupt\w+|cyclone|typhoon|hurricane|landslide|mudslide|avalanche|wildfire|bushfire|flash flood\w*|flood\w*|drought|famine|heatwave|cold snap)\b/i},
+ {id:"disaster", label:"Natural disaster", pts:30, re:/\b(earthquake|magnitude \d|tsunami|volcan\w+|erupt\w+|cyclone|typhoon|hurricane|(severe |winter |tropical )?storm (damage|damages|batters|lashes|hits|leaves)|landslide|mudslide|avalanche|wildfire|bushfire|flash flood\w*|flood\w*|drought|famine|heatwave|cold snap)\b/i},
  {id:"crash", label:"Transport disaster", pts:29, re:/\b((plane|jet|airliner|aircraft|helicopter|cargo plane) (crash\w*|down|missing)|crash\w* (shortly )?after take ?off|train (derail\w*|crash\w*|collision)|derailment|ferry (sank|sink\w*|capsiz\w*)|boat capsiz\w*|migrant boat|bus plunge|pile-?up)\b/i},
  {id:"leader", label:"Leader / figure", pts:28, re:/\b((president|prime minister|king|queen|pope|chancellor|dictator|monarch|leader) .{0,20}(dies|dead|death|assassinated|shot|hospitalised|hospitalized)|state funeral|lies in state)\b/i},
- {id:"unrest", label:"Unrest / protest", pts:26, re:/\b(riot(s|ing)?|mass protests?|demonstrations|crackdown|curfew|clashes|tear gas|general strike|uprising|looting)\b/i},
+ {id:"unrest", label:"Unrest / protest", pts:26, re:/\b(riot(s|ing)?|protest\w*|demonstrat\w+|crackdown|curfew|clashes|tear gas|general strike|uprising|looting|unrest)\b/i},
+ {id:"fire", label:"Fire / rescue", pts:24, re:/\b(fire (breaks out|broke out|guts|destroys|rages|engulf\w*)|(warehouse|factory|market|hospital|school|apartment|tower|building) fire|blaze|firefighters|rescuers (search|dig)|trapped under rubble|search and rescue)\b/i},
  {id:"nuclear", label:"Nuclear / escalation", pts:32, re:/\b(nuclear (test|weapon|strike|threat|plant)|ballistic missile|icbm|uranium enrich\w+|radiation leak|reactor)\b/i},
  {id:"health", label:"Outbreak / health", pts:26, re:/\b(outbreak|epidemic|pandemic|ebola|cholera|bird flu|h5n1|measles outbreak|quarantine|who declares)\b/i},
  {id:"economy", label:"Economy / markets", pts:22, re:/\b(currency (collapse|crash)|default(s|ed)? on|bailout|hyperinflation|markets? (plunge|crash|tumble)|central bank (emergency|raises|cuts)|sanctions|trade war|tariffs?)\b/i},
@@ -4172,6 +4173,32 @@ async function surveyWorldFeeds(onProgress){
   worldFeedSave();
   return found;
 }
+/* Countries left without any feed of their own: Google runs a news edition per country, so those
+   few are read that way. Google won't answer your proxy, so these go through the public relays —
+   fine for a handful, which is why it is capped. */
+const GOOGLE_EDITION_CAP = 12;
+function googleEdition(iso){
+  return "https://news.google.com/rss?hl=en-"+iso+"&gl="+iso+"&ceid="+iso+":en";
+}
+async function readCountryGaps(){
+  const gaps = Object.keys(WORLD_OUTLETS).filter(iso=>!WORLDFEED[iso]).slice(0, GOOGLE_EDITION_CAP);
+  if(!gaps.length) return [];
+  const lists = await Promise.all(gaps.map(async iso=>{
+    try{
+      const items = await fetchFeed(googleEdition(iso));
+      const c = COUNTRIES.find(x=>x.i===iso);
+      return items
+        .filter(it=>it.date && Date.now()-it.date < WORLD_WINDOW*3600e3)
+        .sort((a,b)=>b.date-a.date).slice(0,10)
+        .map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date,
+                   source:(it.src||((c?c.n:iso)+" (Google edition)")), srcUrl:it.srcUrl||it.link, desc:"", iso}));
+    }catch(e){ return []; }
+  }));
+  const out = [].concat(...lists);
+  HEALTH.gapfill = HEALTH.gapfill || {ok:0,fail:0,items:0};
+  HEALTH.gapfill.ok++; HEALTH.gapfill.items += out.length; renderHealth();
+  return out;
+}
 async function readWorldFeeds(onBatch){
   const isos = Object.keys(WORLDFEED);
   if(!isos.length || !PROXY_URL || !BATCH_OK) return [];
@@ -4217,7 +4244,8 @@ function renderWorldCoverage(){
     ? '<div class="ktest ok">'+n+' of '+total+' countries have a national outlet feed'+
         (Object.values(WORLDFEED).filter(f=>f.via==="rss2json").length?' ('+Object.values(WORLDFEED).filter(f=>f.via==="rss2json").length+' through rss2json)':'')+'.</div>'+
       (missing.length ? '<details class="whybox"><summary>'+missing.length+' still missing</summary><div class="ktest off">'+esc(missing.join(", "))+'</div></details>' : '')
-    : '<div class="ktest off">No country feeds yet. Run the survey once and each country is read from its own outlet.</div>');
+    : '<div class="ktest off">No country feeds yet. Run the survey once and each country is read from its own outlet.</div>')
+    + (n && missing.length && missing.length<=GOOGLE_EDITION_CAP ? '<div class="ktest ok">Those '+missing.length+' are covered by Google\'s own edition for each country on every pull.</div>' : '');
 }
 /* Wires and regional aggregators: not tied to one country, so their stories are placed purely by
    what they name. They add speed, corroboration (which lifts a story's rating) and the countries
@@ -4322,7 +4350,8 @@ async function gatherWorld(note){
   return [].concat(...await Promise.all([
     readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[]),
     run("google",()=>pWorldGoogle()).catch(()=>[]),
-    readWires().catch(()=>[])
+    readWires().catch(()=>[]),
+    readCountryGaps().catch(()=>[])
   ]));
 }
 /* the newest foreign headlines only, and never more than 15 seconds spent on them */
