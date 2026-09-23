@@ -1822,7 +1822,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -2156,7 +2156,9 @@ function jsonp(url, ms){
 }
 let gdeltLast = 0;
 let gdeltRest = 0;
-/* GDELT answers plain text when it doesn't like a query or when you ask too often, so its
+/* NOT USED ANY MORE. GDELT was dropped as a source; this is kept only so an older saved page
+   doesn't break. Nothing calls it.
+   GDELT answers plain text when it doesn't like a query or when you ask too often, so its
    reply is read as text first and the complaint is passed on rather than hidden. */
 function gdeltRead(txt){
   const t = (txt||"").trim();
@@ -2391,7 +2393,7 @@ function feedStations(d, n){
    Translation is free and unkeyed, so it can fail — when it does, a small newsroom glossary gets the
    story classified anyway rather than dropping it. */
 let USE_SPANISH = true;
-/* Direct mode: the stations' own feeds plus the keyed APIs and GDELT, all through your proxy.
+/* Direct mode: the stations' own feeds plus the keyed APIs, all through your proxy.
    No Google, no Bing, no public relays — nothing that has been failing. */
 let DIRECT_MODE = false;
 const DIRECT_CAP = 60;
@@ -2428,6 +2430,7 @@ function glossEnglish(t){
   return s.trim();
 }
 const TRANS_STATE = {ok:0, fail:0, last:""};
+let TRANS_DEAD = false;      /* once it has clearly failed, nothing waits on it again this session */
 let TRANS_FROM = "es";      /* which language MyMemory is asked to translate from */
 /* Assume English unless there's a positive sign otherwise: a non-Latin script, or the little words
    that give a language away. Guessing "foreign" wrongly is worse — it sends a fine headline off to
@@ -2442,22 +2445,24 @@ function looksEnglish(t){
   s.split(/\s+/).forEach((w,i,arr)=>{ if(FOREIGN_WORDS.test(" "+w+" ")) hits++; });
   return hits < 2;          /* one stray match could be a name; two is a sentence in another language */
 }
-async function translateBatch(texts){
+async function translateBatch(texts, opts){
   const todo = texts.filter(t=>!TRANS.has(t));
-  if(!todo.length) return;
+  if(!todo.length || TRANS_DEAD) return;
+  const bulk = opts && opts.bulk;
+  const deadline = Date.now() + ((opts && opts.budget) || 20000);
   const chunks = [];
   for(let i=0;i<todo.length;i+=20) chunks.push(todo.slice(i,i+20));
   /* four at a time, so a free translator isn't hit with thirty requests at once */
   let next = 0;
   const worker = async () => {
     while(next < chunks.length){
-      const chunk = chunks[next++];
-      await translateChunk(chunk);
+      if(Date.now() > deadline || TRANS_DEAD) return;
+      await translateChunk(chunks[next++], bulk);
     }
   };
   await Promise.all(Array.from({length:Math.min(4,chunks.length)}, worker));
 }
-async function translateChunk(chunk){
+async function translateChunk(chunk, bulk){
   {
     let done = false;
     /* Google's unkeyed endpoint takes the whole chunk in one request */
@@ -2475,6 +2480,13 @@ async function translateChunk(chunk){
       done = chunk.every(t=>TRANS.has(t));
       if(done){ TRANS_STATE.ok++; TRANS_STATE.last="ok"; }
     }catch(e){ TRANS_STATE.last = (e&&e.message)||"failed"; }
+    if(!done && bulk){
+      /* in bulk, one failed batch is enough: never grind through hundreds of single requests */
+      TRANS_STATE.fail++;
+      if(!TRANS_STATE.ok) TRANS_DEAD = true;
+      chunk.forEach(t=>{ if(!TRANS.has(t)) TRANS.set(t, null); });
+      return;
+    }
     if(!done){
       /* one at a time through MyMemory, then give up and use the glossary */
       for(const t of chunk){
@@ -2809,8 +2821,7 @@ async function sweep(){
     tasks.push(async()=>{ const r = await run("geo",()=>pGeo(d.city+", "+((STATES[d.st]||[""])[0]||d.st))); ingest(r,[d.id]); livePaint(); return []; });
     feedStations(d,1).forEach(st=>tasks.push(async()=>{ const r = await run("station",()=>pStation(st.call)); ingest(r,[d.id]); livePaint(); return []; }));
   });
-  const gd = GDELT_Q.map(q=>feed(()=>run("gdelt",()=>pGdelt(q,"3h"))));
-  gd.push(feed(()=>run("gdelt",()=>pGdelt(GDELT_BIG,"24h"))));
+  const gd = [];   /* GDELT is no longer used */
   let total = tasks.length + gd.length + 1, done = 0;
   const tick = () => { done++; progress(done,total,"Pulled "+done+" of "+total+" · "+Math.round((Date.now()-pullStart)/1000)+" s · stories appear as they land"); };
   const lanes = () => Math.max(2, Math.min(8, RELAY_STATE.filter(st=>st.benchedUntil<Date.now()).length * RELAY_MAX));
@@ -2986,7 +2997,7 @@ async function directSweep(){
   }
   const k = nextKeyed();
   if(k) tasks.push(async()=>{ const r = await run(k[0],()=>k[1](k[2])); ingest(r,null); livePaint(); return []; });
-  const gd = [()=>run("gdelt",()=>pGdelt(GDELT_Q[0],"3h")), ()=>run("gdelt",()=>pGdelt(GDELT_BIG,"24h"))];
+  const gd = [];   /* GDELT is no longer used */
   let total = tasks.length + gd.length + 1, done = 0;
   const tick = () => { done++; progress(done,total,"Read "+done+" of "+total+" sources · "+Math.round((Date.now()-pullStart)/1000)+" s"); };
   await Promise.all([
@@ -4177,15 +4188,7 @@ async function readWorldFeeds(onBatch){
     return out;
   }));
   let items = [].concat(...perChunk);
-  /* one translation pass for everything foreign, rather than one per country */
-  /* the newest foreign headlines only: the translator is free and unkeyed, so don't flood it */
-  const foreign = items.filter(i=>!looksEnglish(i.title)).sort((a,b)=>b.ms-a.ms).slice(0,200);
-  if(foreign.length){
-    TRANS_FROM = "auto";
-    const fixed = await withTranslation(foreign.map(i=>Object.assign(i,{es:true, orig:i.title})));
-    const byUrl = new Map(fixed.map(i=>[i.url,i]));
-    items = items.map(i=>byUrl.get(i.url)||i);
-  }
+  /* translation happens after the desk is on screen, see translateWorld */
   return items;
 }
 function renderWorldCoverage(){
@@ -4209,11 +4212,48 @@ async function pWorldGoogle(){
   const items = await fetchFeed(u);
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
 }
+/* The desk goes up as soon as the feeds are in. Translating foreign headlines happens afterwards,
+   on a time budget, and rebuilds the desk if it changed anything — so a slow or blocked translator
+   can never hold up the pull. */
 async function loadWorld(){
-  /* country outlets only: each story comes from a newsroom in the country it is about */
-  const note = m => { const n = $("worldNote"); if(n) n.textContent = m; };
-  const got = await readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[]);
-  note("");
+  const note0 = m => { const n = $("worldNote"); if(n) n.textContent = m; };
+  const got = await gatherWorld(note0);
+  buildWorld(got);
+  note0("");
+  if(!TRANS_DEAD && got.some(a=>!looksEnglish(a.title))){
+    setTimeout(async()=>{
+      note0("Translating foreign headlines…");
+      /* hard stop: whatever the translator is doing, the desk is already on screen */
+      const changed = await Promise.race([
+        translateWorld(got),
+        new Promise(r=>setTimeout(()=>{ TRANS_DEAD = true; r(false); }, 10000))
+      ]);
+      note0(TRANS_DEAD ? "The translator can't be reached from here, so foreign headlines are shown as published." : "");
+      if(changed){ buildWorld(got); renderWorld(); }
+    }, 10);
+  }
+  return WORLD;
+}
+async function gatherWorld(note){
+  return [].concat(...await Promise.all([
+    readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[]),
+    run("google",()=>pWorldGoogle()).catch(()=>[])
+  ]));
+}
+/* the newest foreign headlines only, and never more than 15 seconds spent on them */
+async function translateWorld(items){
+  const foreign = items.filter(i=>!looksEnglish(i.title)).sort((a,b)=>b.ms-a.ms).slice(0,80);
+  if(!foreign.length || TRANS_DEAD) return false;
+  TRANS_FROM = "auto";
+  await translateBatch(foreign.map(i=>i.title), {bulk:true, budget:15000});
+  let changed = false;
+  foreign.forEach(i=>{
+    const en = TRANS.get(i.title);
+    if(en){ i.orig = i.title; i.title = en; i.translated = true; i.es = true; changed = true; }
+  });
+  return changed;
+}
+function buildWorld(got){
   const byKey = new Map();
   const now = Date.now();
   got.forEach(a=>{
@@ -4302,7 +4342,7 @@ function natPlaces(t){
 }
 /* score the national picture from articles we already have */
 function natFromArticles(got, src){
-  const rec = {checked:true,t:Date.now(),level:0,tags:[],heads:[],urls:[],src:src||"the same GDELT pull",since:0,nets:[],places:[]};
+  const rec = {checked:true,t:Date.now(),level:0,tags:[],heads:[],urls:[],src:src||"the same news pull",since:0,nets:[],places:[]};
   const hits = {};
   (got||[]).forEach(a=>{
     const t = a.title||"";
@@ -4337,10 +4377,9 @@ function natFromArticles(got, src){
 }
 async function loadNational(force){
   if(!force && natState.t && Date.now()-natState.t < 10*60e3) return natState;
-  /* in direct mode the national check goes through GDELT, which your proxy can reach,
-     rather than Google and Bing, which it cannot */
+  /* in direct mode the national check is a plain news search */
   const got = DIRECT_MODE
-    ? await run("gdelt",()=>pGdelt('("breaking news" OR "special report" OR "press conference" OR "state of emergency" OR "mass shooting" OR "plane crash" OR dies OR resigns)', "3h"))
+    ? [].concat(...await Promise.all([run("google",()=>pGoogle("breaking news")), run("bing",()=>pBing("breaking news United States"))]))
     : [].concat(...await Promise.all([
         run("google",()=>pGoogle("breaking news")),
         run("bing",()=>pBing("breaking news United States")),
@@ -4725,7 +4764,6 @@ function init(){
     /* 1. can this page reach anything at all? Several sites at once, because any one of them
           can be slow, down, or blocked without that meaning the page itself is cut off. */
     const CHECKS = [
-      ["GDELT","https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"],
       ["allorigins","https://api.allorigins.win/raw?url="+encodeURIComponent("https://example.com")],
       ["rss2json","https://api.rss2json.com/v1/api.json?rss_url="+encodeURIComponent("https://feeds.bbci.co.uk/news/rss.xml")]
     ];
@@ -4881,7 +4919,7 @@ function init(){
       if(worldBusy) return;
       const b = e.target;
       worldBusy = true; b.disabled = true; b.textContent = "Pulling…";
-      const note = $("worldNote"); if(note) note.textContent = "Reading country feeds, GDELT and Google's world edition…";
+      const note = $("worldNote"); if(note) note.textContent = "Reading country feeds and Google's world edition…";
       loadWorld().then(
         ()=>{ worldBusy = false; renderWorld(); },
         e2=>{ worldBusy = false; b.disabled = false; b.textContent = "Pull world desk";
