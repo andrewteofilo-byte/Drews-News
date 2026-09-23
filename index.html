@@ -318,6 +318,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <button class="btn" id="surveyTop">Add stations</button>
     </div>
     <div id="passReport"></div>
+    <button class="btn wide" id="worldSurvey">Find a feed for every country</button>
+    <div id="worldCover"></div>
     <p class="lab" style="margin-top:10px">Every feed being read</p>
     <div id="feedList"></div>
     <div id="feedCover"></div>
@@ -1819,7 +1821,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",gdelt:"GDELT",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -2422,6 +2424,20 @@ function glossEnglish(t){
   return s.trim();
 }
 const TRANS_STATE = {ok:0, fail:0, last:""};
+let TRANS_FROM = "es";      /* which language MyMemory is asked to translate from */
+/* Assume English unless there's a positive sign otherwise: a non-Latin script, or the little words
+   that give a language away. Guessing "foreign" wrongly is worse — it sends a fine headline off to
+   be translated and mangled. */
+const NON_LATIN = /[\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0E00-\u0E7F\u10A0-\u10FF\u0530-\u058F]/;
+const FOREIGN_WORDS = /(^|\s)(le|la|les|des|du|une|aux|dans|pour|apres|sur|avec|el|los|las|del|por|para|con|una|tras|segun|der|die|das|und|mit|nach|bei|von|den|il|lo|gli|della|dopo|per|che|nel|os|as|dos|das|nao|apos|para|em|van|het|een|voor|na|bij|og|til|för|och|att|ve|ile|bir|için|w|z|na|do|po|ile|od|ja|se|ei|och)(\s|$)/i;
+function looksEnglish(t){
+  const s = (t||"").trim();
+  if(!s) return true;
+  if(NON_LATIN.test(s)) return false;
+  let hits = 0;
+  s.split(/\s+/).forEach((w,i,arr)=>{ if(FOREIGN_WORDS.test(" "+w+" ")) hits++; });
+  return hits < 2;          /* one stray match could be a name; two is a sentence in another language */
+}
 async function translateBatch(texts){
   const todo = texts.filter(t=>!TRANS.has(t));
   if(!todo.length) return;
@@ -2430,7 +2446,7 @@ async function translateBatch(texts){
     let done = false;
     /* Google's unkeyed endpoint takes the whole chunk in one request */
     try{
-      const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=es&tl=en&dt=t&q="+chunk.map(encodeURIComponent).join("&q=");
+      const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q="+chunk.map(encodeURIComponent).join("&q=");
       const j = await directOrRelayJson(url, "the translator");
       /* one text comes back as the block itself; several come back as a list of blocks */
       const single = Array.isArray(j[0]) && Array.isArray(j[0][0]) && typeof j[0][0][0] === "string";
@@ -2448,7 +2464,7 @@ async function translateBatch(texts){
       for(const t of chunk){
         if(TRANS.has(t)) continue;
         try{
-          const j = await directOrRelayJson("https://api.mymemory.translated.net/get?langpair=es|en&q="+encodeURIComponent(t.slice(0,480)), "the translator");
+          const j = await directOrRelayJson("https://api.mymemory.translated.net/get?langpair="+(TRANS_FROM||"es")+"|en&q="+encodeURIComponent(t.slice(0,480)), "the translator");
           const en = j && j.responseData && j.responseData.translatedText;
           if(en && !/MYMEMORY WARNING/i.test(en)){ TRANS.set(t, en); TRANS_STATE.ok++; continue; }
           throw new Error(en || "no translation");
@@ -4045,6 +4061,84 @@ function classifyWorld(text){
   hits.sort((a,b)=>b.pts-a.pts);
   return {rule:hits[0], second:hits[1]||null};
 }
+/* One national outlet per country (two for the bigger ones), read straight from their own feeds
+   through your proxy — the same idea as the station feeds, a country at a time. Non-English
+   headlines are translated before they are classified. */
+const WORLD_OUTLETS = {"AF":{"o":[["Tolo News","tolonews.com"],["Ariana News","ariananews.af"]],"l":"en"},"AL":{"o":[["Albanian Daily News","albaniandailynews.com"]],"l":"en"},"DZ":{"o":[["Algeria Press Service","aps.dz"]],"l":"fr"},"AD":{"o":[["Diari d'Andorra","diariandorra.ad"]],"l":"ca"},"AO":{"o":[["Angola Press","angop.ao"]],"l":"pt"},"AG":{"o":[["Antigua Observer","antiguaobserver.com"]],"l":"en"},"AR":{"o":[["Buenos Aires Herald","buenosairesherald.com"],["Infobae","infobae.com"]],"l":"en"},"AM":{"o":[["Armenpress","armenpress.am"]],"l":"en"},"AU":{"o":[["ABC News","abc.net.au"],["news.com.au","news.com.au"]],"l":"en"},"AT":{"o":[["The Local Austria","thelocal.at"],["ORF","orf.at"]],"l":"en"},"AZ":{"o":[["Trend News","en.trend.az"]],"l":"en"},"BS":{"o":[["Nassau Guardian","thenassauguardian.com"]],"l":"en"},"BH":{"o":[["Gulf Daily News","gdnonline.com"]],"l":"en"},"BD":{"o":[["The Daily Star","thedailystar.net"],["Dhaka Tribune","dhakatribune.com"]],"l":"en"},"BB":{"o":[["Barbados Today","barbadostoday.bb"]],"l":"en"},"BY":{"o":[["Belta","eng.belta.by"]],"l":"en"},"BE":{"o":[["The Brussels Times","brusselstimes.com"],["VRT News","vrt.be"]],"l":"en"},"BZ":{"o":[["Amandala","amandala.com.bz"]],"l":"en"},"BJ":{"o":[["La Nation","lanationbenin.info"]],"l":"fr"},"BT":{"o":[["Kuensel","kuenselonline.com"]],"l":"en"},"BO":{"o":[["La Razon","la-razon.com"]],"l":"es"},"BA":{"o":[["Sarajevo Times","sarajevotimes.com"]],"l":"en"},"BW":{"o":[["Mmegi","mmegi.bw"]],"l":"en"},"BR":{"o":[["Agencia Brasil","agenciabrasil.ebc.com.br"],["G1","g1.globo.com"]],"l":"pt"},"BN":{"o":[["Borneo Bulletin","borneobulletin.com.bn"]],"l":"en"},"BG":{"o":[["Novinite","novinite.com"]],"l":"en"},"BF":{"o":[["Burkina24","burkina24.com"]],"l":"fr"},"BI":{"o":[["Iwacu","iwacu-burundi.org"]],"l":"fr"},"KH":{"o":[["Khmer Times","khmertimeskh.com"]],"l":"en"},"CM":{"o":[["Journal du Cameroun","journalducameroun.com"]],"l":"fr"},"CA":{"o":[["CBC News","cbc.ca"],["CTV News","ctvnews.ca"]],"l":"en"},"CV":{"o":[["Expresso das Ilhas","expressodasilhas.cv"]],"l":"pt"},"CF":{"o":[["Radio Ndeke Luka","radiondekeluka.org"]],"l":"fr"},"TD":{"o":[["Alwihda Info","alwihdainfo.com"]],"l":"fr"},"CL":{"o":[["BioBioChile","biobiochile.cl"]],"l":"es"},"CN":{"o":[["Global Times","globaltimes.cn"],["South China Morning Post","scmp.com"]],"l":"en"},"CO":{"o":[["El Tiempo","eltiempo.com"]],"l":"es"},"KM":{"o":[["Al-Watwan","alwatwan.net"]],"l":"fr"},"CG":{"o":[["Les Depeches de Brazzaville","adiac-congo.com"]],"l":"fr"},"CD":{"o":[["Radio Okapi","radiookapi.net"]],"l":"fr"},"CR":{"o":[["Tico Times","ticotimes.net"]],"l":"en"},"HR":{"o":[["Total Croatia News","total-croatia-news.com"]],"l":"en"},"CU":{"o":[["Granma","en.granma.cu"]],"l":"en"},"CY":{"o":[["Cyprus Mail","cyprus-mail.com"]],"l":"en"},"CZ":{"o":[["Expats.cz","expats.cz"],["Prague Morning","praguemorning.cz"]],"l":"en"},"DK":{"o":[["The Local Denmark","thelocal.dk"],["DR","dr.dk"]],"l":"en"},"DJ":{"o":[["La Nation Djibouti","lanationdj.com"]],"l":"fr"},"DM":{"o":[["Dominica News Online","dominicanewsonline.com"]],"l":"en"},"DO":{"o":[["Diario Libre","diariolibre.com"]],"l":"es"},"EC":{"o":[["El Universo","eluniverso.com"]],"l":"es"},"EG":{"o":[["Egypt Independent","egyptindependent.com"],["Ahram Online","english.ahram.org.eg"]],"l":"en"},"SV":{"o":[["El Diario de Hoy","elsalvador.com"]],"l":"es"},"GQ":{"o":[["Ahora EG","ahoraeg.com"]],"l":"es"},"ER":{"o":[["Shabait","shabait.com"]],"l":"en"},"EE":{"o":[["ERR News","news.err.ee"]],"l":"en"},"SZ":{"o":[["Times of Eswatini","times.co.sz"]],"l":"en"},"ET":{"o":[["Addis Standard","addisstandard.com"]],"l":"en"},"FJ":{"o":[["Fiji Times","fijitimes.com.fj"]],"l":"en"},"FI":{"o":[["Yle News","yle.fi"]],"l":"en"},"FR":{"o":[["France 24","france24.com"],["Le Monde","lemonde.fr"]],"l":"en"},"GA":{"o":[["Gabon Review","gabonreview.com"]],"l":"fr"},"GM":{"o":[["The Point","thepoint.gm"]],"l":"en"},"GE":{"o":[["Agenda.ge","agenda.ge"]],"l":"en"},"DE":{"o":[["Deutsche Welle","dw.com"],["Der Spiegel","spiegel.de"]],"l":"en"},"GH":{"o":[["GhanaWeb","ghanaweb.com"],["MyJoyOnline","myjoyonline.com"]],"l":"en"},"GR":{"o":[["Ekathimerini","ekathimerini.com"]],"l":"en"},"GD":{"o":[["NOW Grenada","nowgrenada.com"]],"l":"en"},"GT":{"o":[["Prensa Libre","prensalibre.com"]],"l":"es"},"GN":{"o":[["Guinee News","guineenews.org"]],"l":"fr"},"GW":{"o":[["O Democrata","odemocratagb.com"]],"l":"pt"},"GY":{"o":[["Stabroek News","stabroeknews.com"]],"l":"en"},"HT":{"o":[["Le Nouvelliste","lenouvelliste.com"]],"l":"fr"},"HN":{"o":[["La Prensa","laprensa.hn"]],"l":"es"},"HU":{"o":[["Hungary Today","hungarytoday.hu"]],"l":"en"},"IS":{"o":[["Iceland Monitor","icelandmonitor.mbl.is"]],"l":"en"},"IN":{"o":[["The Hindu","thehindu.com"],["NDTV","ndtv.com"]],"l":"en"},"ID":{"o":[["Jakarta Post","thejakartapost.com"],["Antara News","en.antaranews.com"]],"l":"en"},"IR":{"o":[["Tehran Times","tehrantimes.com"]],"l":"en"},"IQ":{"o":[["Rudaw","rudaw.net"],["Shafaq News","shafaq.com"]],"l":"en"},"IE":{"o":[["RTE News","rte.ie"],["Irish Times","irishtimes.com"]],"l":"en"},"IL":{"o":[["Times of Israel","timesofisrael.com"],["Haaretz","haaretz.com"]],"l":"en"},"IT":{"o":[["ANSA English","ansa.it"],["Corriere","corriere.it"]],"l":"en"},"CI":{"o":[["Abidjan.net","news.abidjan.net"]],"l":"fr"},"JM":{"o":[["Jamaica Gleaner","jamaica-gleaner.com"]],"l":"en"},"JP":{"o":[["NHK World","www3.nhk.or.jp"],["Japan Times","japantimes.co.jp"]],"l":"en"},"JO":{"o":[["Jordan Times","jordantimes.com"]],"l":"en"},"KZ":{"o":[["Astana Times","astanatimes.com"]],"l":"en"},"KE":{"o":[["Daily Nation","nation.africa"],["The Standard","standardmedia.co.ke"]],"l":"en"},"KI":{"o":[["Kiribati Newstar","kiribatinewstar.com"]],"l":"en"},"XK":{"o":[["Kosovo Online","kosovo-online.com"]],"l":"en"},"KW":{"o":[["Kuwait Times","kuwaittimes.com"]],"l":"en"},"KG":{"o":[["24.kg","24.kg"]],"l":"en"},"LA":{"o":[["Vientiane Times","vientianetimes.org.la"]],"l":"en"},"LV":{"o":[["LSM","eng.lsm.lv"]],"l":"en"},"LB":{"o":[["L'Orient Today","today.lorientlejour.com"],["Naharnet","naharnet.com"]],"l":"en"},"LS":{"o":[["Lesotho Times","lestimes.com"]],"l":"en"},"LR":{"o":[["FrontPage Africa","frontpageafricaonline.com"]],"l":"en"},"LY":{"o":[["Libya Observer","libyaobserver.ly"]],"l":"en"},"LI":{"o":[["Vaterland","vaterland.li"]],"l":"de"},"LT":{"o":[["LRT English","lrt.lt"]],"l":"en"},"LU":{"o":[["Luxembourg Times","luxtimes.lu"]],"l":"en"},"MG":{"o":[["L'Express de Madagascar","lexpress.mg"]],"l":"fr"},"MW":{"o":[["Nyasa Times","nyasatimes.com"]],"l":"en"},"MY":{"o":[["The Star","thestar.com.my"],["Malay Mail","malaymail.com"]],"l":"en"},"MV":{"o":[["Maldives Times","maldivestimes.com"]],"l":"en"},"ML":{"o":[["Maliweb","maliweb.net"]],"l":"fr"},"MT":{"o":[["Times of Malta","timesofmalta.com"]],"l":"en"},"MH":{"o":[["Marshall Islands Journal","marshallislandsjournal.com"]],"l":"en"},"MR":{"o":[["Sahara Media","saharamedias.net"]],"l":"fr"},"MU":{"o":[["Le Mauricien","lemauricien.com"]],"l":"fr"},"MX":{"o":[["El Universal","eluniversal.com.mx"],["Mexico News Daily","mexiconewsdaily.com"]],"l":"es"},"FM":{"o":[["FSM Information","gov.fm"]],"l":"en"},"MD":{"o":[["Moldova 1","moldova1.md"]],"l":"ro"},"MC":{"o":[["Monaco Tribune","monacotribune.com"]],"l":"en"},"MN":{"o":[["Montsame","montsame.mn"]],"l":"en"},"ME":{"o":[["Vijesti","vijesti.me"]],"l":"sr"},"MA":{"o":[["Morocco World News","moroccoworldnews.com"]],"l":"en"},"MZ":{"o":[["Club of Mozambique","clubofmozambique.com"]],"l":"en"},"MM":{"o":[["Irrawaddy","irrawaddy.com"]],"l":"en"},"NA":{"o":[["New Era","neweralive.na"]],"l":"en"},"NR":{"o":[["Nauru Bulletin","naurubulletin.com"]],"l":"en"},"NP":{"o":[["Kathmandu Post","kathmandupost.com"]],"l":"en"},"NL":{"o":[["NL Times","nltimes.nl"],["NOS","nos.nl"]],"l":"en"},"NZ":{"o":[["RNZ","rnz.co.nz"],["NZ Herald","nzherald.co.nz"]],"l":"en"},"NI":{"o":[["La Prensa Nicaragua","laprensani.com"]],"l":"es"},"NE":{"o":[["ActuNiger","actuniger.com"]],"l":"fr"},"NG":{"o":[["Premium Times","premiumtimesng.com"],["Punch","punchng.com"]],"l":"en"},"KP":{"o":[["NK News","nknews.org"]],"l":"en"},"MK":{"o":[["Republika","republika.mk"]],"l":"mk"},"NO":{"o":[["Norway Today","norwaytoday.info"],["NRK","nrk.no"]],"l":"en"},"OM":{"o":[["Times of Oman","timesofoman.com"]],"l":"en"},"PK":{"o":[["Dawn","dawn.com"],["Geo News","geo.tv"]],"l":"en"},"PW":{"o":[["Island Times","islandtimes.org"]],"l":"en"},"PS":{"o":[["Wafa","english.wafa.ps"],["Maan News","maannews.net"]],"l":"en"},"PA":{"o":[["La Prensa Panama","prensa.com"]],"l":"es"},"PG":{"o":[["Post-Courier","postcourier.com.pg"]],"l":"en"},"PY":{"o":[["ABC Color","abc.com.py"]],"l":"es"},"PE":{"o":[["El Comercio","elcomercio.pe"]],"l":"es"},"PH":{"o":[["Rappler","rappler.com"],["Inquirer","inquirer.net"]],"l":"en"},"PL":{"o":[["Notes from Poland","notesfrompoland.com"],["TVP World","tvpworld.com"]],"l":"en"},"PT":{"o":[["Publico","publico.pt"]],"l":"pt"},"QA":{"o":[["Al Jazeera","aljazeera.com"],["Peninsula","thepeninsulaqatar.com"]],"l":"en"},"RO":{"o":[["Romania Insider","romania-insider.com"]],"l":"en"},"RU":{"o":[["Moscow Times","themoscowtimes.com"],["TASS","tass.com"]],"l":"en"},"RW":{"o":[["New Times Rwanda","newtimes.co.rw"]],"l":"en"},"KN":{"o":[["SKN Vibes","sknvibes.com"]],"l":"en"},"LC":{"o":[["St Lucia Times","stluciatimes.com"]],"l":"en"},"VC":{"o":[["Searchlight","searchlight.vc"]],"l":"en"},"WS":{"o":[["Samoa Observer","samoaobserver.ws"]],"l":"en"},"SM":{"o":[["San Marino RTV","sanmarinortv.sm"]],"l":"it"},"ST":{"o":[["STP Press","stp-press.st"]],"l":"pt"},"SA":{"o":[["Arab News","arabnews.com"],["Saudi Gazette","saudigazette.com.sa"]],"l":"en"},"SN":{"o":[["Seneweb","seneweb.com"]],"l":"fr"},"RS":{"o":[["N1","n1info.rs"]],"l":"sr"},"SC":{"o":[["Seychelles Nation","nation.sc"]],"l":"en"},"SL":{"o":[["Sierra Leone Telegraph","thesierraleonetelegraph.com"]],"l":"en"},"SG":{"o":[["Straits Times","straitstimes.com"],["CNA","channelnewsasia.com"]],"l":"en"},"SK":{"o":[["Slovak Spectator","spectator.sme.sk"]],"l":"en"},"SI":{"o":[["Slovenia Times","sloveniatimes.com"]],"l":"en"},"SB":{"o":[["Solomon Star","solomonstarnews.com"]],"l":"en"},"SO":{"o":[["Hiiraan","hiiraan.com"],["Garowe Online","garoweonline.com"]],"l":"en"},"ZA":{"o":[["News24","news24.com"],["Daily Maverick","dailymaverick.co.za"]],"l":"en"},"KR":{"o":[["Yonhap","en.yna.co.kr"],["Korea Herald","koreaherald.com"]],"l":"en"},"SS":{"o":[["Radio Tamazuj","radiotamazuj.org"]],"l":"en"},"ES":{"o":[["El Pais","elpais.com"],["RTVE","rtve.es"]],"l":"es"},"LK":{"o":[["Daily Mirror","dailymirror.lk"]],"l":"en"},"SD":{"o":[["Sudan Tribune","sudantribune.com"]],"l":"en"},"SR":{"o":[["Starnieuws","starnieuws.com"]],"l":"nl"},"SE":{"o":[["The Local Sweden","thelocal.se"],["SVT","svt.se"]],"l":"en"},"CH":{"o":[["Swissinfo","swissinfo.ch"]],"l":"en"},"SY":{"o":[["Syria Direct","syriadirect.org"]],"l":"en"},"TW":{"o":[["Taipei Times","taipeitimes.com"],["Focus Taiwan","focustaiwan.tw"]],"l":"en"},"TJ":{"o":[["Asia-Plus","asiaplustj.info"]],"l":"en"},"TZ":{"o":[["The Citizen","thecitizen.co.tz"]],"l":"en"},"TH":{"o":[["Bangkok Post","bangkokpost.com"],["Nation Thailand","nationthailand.com"]],"l":"en"},"TL":{"o":[["Tatoli","tatoli.tl"]],"l":"pt"},"TG":{"o":[["Togo Breaking News","togobreakingnews.info"]],"l":"fr"},"TO":{"o":[["Matangi Tonga","matangitonga.to"]],"l":"en"},"TT":{"o":[["Trinidad Guardian","guardian.co.tt"]],"l":"en"},"TN":{"o":[["Tunis Afrique Presse","tap.info.tn"]],"l":"fr"},"TR":{"o":[["Hurriyet Daily News","hurriyetdailynews.com"],["Daily Sabah","dailysabah.com"]],"l":"en"},"TM":{"o":[["Turkmenportal","turkmenportal.com"]],"l":"ru"},"TV":{"o":[["Tuvalu Paradise","tuvaluparadise.tv"]],"l":"en"},"UG":{"o":[["Daily Monitor","monitor.co.ug"]],"l":"en"},"UA":{"o":[["Kyiv Independent","kyivindependent.com"],["Ukrinform","ukrinform.net"]],"l":"en"},"AE":{"o":[["The National","thenationalnews.com"],["Khaleej Times","khaleejtimes.com"]],"l":"en"},"GB":{"o":[["BBC News","bbc.co.uk"],["Sky News","news.sky.com"]],"l":"en"},"UY":{"o":[["El Pais Uruguay","elpais.com.uy"]],"l":"es"},"UZ":{"o":[["Gazeta.uz","gazeta.uz"]],"l":"ru"},"VU":{"o":[["Vanuatu Daily Post","dailypost.vu"]],"l":"en"},"VA":{"o":[["Vatican News","vaticannews.va"]],"l":"en"},"VE":{"o":[["Efecto Cocuyo","efectococuyo.com"]],"l":"es"},"VN":{"o":[["VnExpress International","e.vnexpress.net"],["Tuoi Tre News","tuoitrenews.vn"]],"l":"en"},"YE":{"o":[["Yemen Online","yemenonline.info"]],"l":"en"},"ZM":{"o":[["Lusaka Times","lusakatimes.com"]],"l":"en"},"ZW":{"o":[["NewsDay","newsday.co.zw"]],"l":"en"},"HK":{"o":[["Hong Kong Free Press","hongkongfp.com"]],"l":"en"},"PR":{"o":[["El Nuevo Dia","elnuevodia.com"]],"l":"es"},"GL":{"o":[["Sermitsiaq","sermitsiaq.ag"]],"l":"da"}};
+const WORLDFEED_KEY = "ds-hyperlocal-worldfeeds";
+let WORLDFEED = {};        /* iso2 -> {name, url, lang} */
+function worldFeedLoad(){ return storeGet(WORLDFEED_KEY,{}).then(v=>{ WORLDFEED = v||{}; renderWorldCoverage(); }); }
+function worldFeedSave(){ storeSet(WORLDFEED_KEY, WORLDFEED); renderWorldCoverage(); }
+const WORLD_PATHS = ["/feed/","/rss","/rss.xml","/feed","/en/rss","/rssfeeds/","/arc/outboundfeeds/rss/?outputType=xml"];
+async function surveyWorldFeeds(onProgress){
+  if(!PROXY_URL || !BATCH_OK) return 0;
+  const todo = Object.keys(WORLD_OUTLETS).filter(iso=>!WORLDFEED[iso]);
+  /* 1. homepages, for whatever they advertise */
+  const pages = [];
+  todo.forEach(iso=>WORLD_OUTLETS[iso].o.forEach(([name,dom])=>pages.push({iso, name, dom, url:"https://"+dom+"/"})));
+  const tryList = [];
+  for(let i=0;i<pages.length;i+=25){
+    const slice = pages.slice(i,i+25);
+    let res = []; try{ res = await proxyBatch(slice.map(p=>p.url)); }catch(e){}
+    res.forEach(r=>{
+      const pg = slice.find(p=>p.url===r.url); if(!pg || !r.body) return;
+      feedLinksIn(r.body, pg.url).forEach(u=>tryList.push({iso:pg.iso, name:pg.name, url:u}));
+    });
+    onProgress && onProgress("reading homepages "+Math.min(i+25,pages.length)+" of "+pages.length);
+  }
+  /* 2. then the usual paths */
+  todo.forEach(iso=>WORLD_OUTLETS[iso].o.forEach(([name,dom])=>WORLD_PATHS.forEach(pt=>tryList.push({iso, name, url:"https://"+dom+pt}))));
+  let found = 0;
+  for(let i=0;i<tryList.length;i+=25){
+    const slice = tryList.slice(i,i+25).filter(x=>!WORLDFEED[x.iso]);
+    if(!slice.length) continue;
+    let res = []; try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){}
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || WORLDFEED[job.iso]) return;
+      if(r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){
+        WORLDFEED[job.iso] = {name:job.name, url:job.url, lang:(WORLD_OUTLETS[job.iso]||{}).l||"en", t:Date.now()};
+        found++;
+      }
+    });
+    onProgress && onProgress("testing feeds · "+Object.keys(WORLDFEED).length+" countries");
+  }
+  worldFeedSave();
+  return found;
+}
+async function readWorldFeeds(){
+  const isos = Object.keys(WORLDFEED);
+  if(!isos.length || !PROXY_URL || !BATCH_OK) return [];
+  const out = [];
+  for(let i=0;i<isos.length;i+=25){
+    const slice = isos.slice(i,i+25);
+    let res = []; try{ res = await proxyBatch(slice.map(iso=>WORLDFEED[iso].url)); }catch(e){ continue; }
+    for(const r of res){
+      const iso = slice.find(x=>WORLDFEED[x].url===r.url); if(!iso) continue;
+      if(!r.ok || !r.body || !/<(rss|feed|item)[\s>]/i.test(r.body)) continue;
+      const f = WORLDFEED[iso];
+      let items = parseRss(r.body).map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
+      /* judge the headline rather than trusting a label: an outlet's language isn't always its country's */
+      const foreign = items.filter(i=>!looksEnglish(i.title));
+      if(foreign.length){
+        TRANS_FROM = f.lang && f.lang!=="en" ? f.lang : "auto";
+        const fixed = await withTranslation(foreign.map(i=>Object.assign(i,{es:true, orig:i.title})));
+        const byUrl = new Map(fixed.map(i=>[i.url,i]));
+        items = items.map(i=>byUrl.get(i.url)||i);
+      }
+      out.push(...items);
+    }
+    HEALTH.world = HEALTH.world || {ok:0,fail:0,items:0};
+    HEALTH.world.ok++; HEALTH.world.items += out.length; renderHealth();
+  }
+  return out;
+}
+function renderWorldCoverage(){
+  const box = $("worldCover"); if(!box) return;
+  const n = Object.keys(WORLDFEED).length, total = Object.keys(WORLD_OUTLETS).length;
+  box.innerHTML = n
+    ? '<div class="ktest ok">'+n+' of '+total+' countries have a national outlet feed.</div>'
+    : '<div class="ktest off">No country feeds yet. Run the survey once and each country is read from its own outlet.</div>';
+}
 let WORLD = [];                 /* the stories */
 let WORLD_T = 0;                /* when it was last pulled */
 const WORLD_Q_GD = '("air strike" OR missile OR earthquake OR coup OR "state of emergency" OR "plane crash" OR "death toll" OR ceasefire OR evacuated OR "mass casualties" OR protests OR resigned)';
@@ -4056,7 +4150,8 @@ async function pWorldGoogle(){
 async function loadWorld(){
   const got = [].concat(...await Promise.all([
     run("gdelt",()=>pGdelt(WORLD_Q_GD,"24h")).catch(()=>[]),
-    run("google",()=>pWorldGoogle()).catch(()=>[])
+    run("google",()=>pWorldGoogle()).catch(()=>[]),
+    readWorldFeeds().catch(()=>[])
   ]));
   const byKey = new Map();
   const now = Date.now();
@@ -4065,7 +4160,9 @@ async function loadWorld(){
     const k = normKey(a.title);
     if(!k) return;
     let s = byKey.get(k);
-    if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set()}; byKey.set(k,s); }
+    if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set(), isos:new Set(), orig:a.orig||"", translated:!!a.translated}; byKey.set(k,s); }
+    if(a.iso) s.isos.add(a.iso);
+    if(a.orig && !s.orig){ s.orig = a.orig; s.translated = !!a.translated; }
     s.ms = Math.max(s.ms,a.ms);
     if(a.source) s.sources.add(a.source.trim());
     s.texts.add(a.title+" "+(a.desc||""));
@@ -4075,7 +4172,13 @@ async function loadWorld(){
     const text = [...s.texts].join(" ");
     const cls = classifyWorld(text);
     if(!cls) return;
-    const cs = placeCountry(text);
+    let cs = placeCountry(text);
+    /* read from that country's own outlet: if the headline names nowhere else, it is about there */
+    if(s.isos && s.isos.size){
+      const home = [...s.isos].map(iso=>COUNTRIES.findIndex(c=>c.i===iso)).filter(i=>i>=0);
+      if(!cs.length) cs = home;
+      else home.forEach(i=>{ if(!cs.includes(i)) cs.push(i); });
+    }
     const cas = casualties(text);
     const ageMin = (now - s.ms)/60000;
     const why = [];
@@ -4112,7 +4215,8 @@ function renderWorld(){
       '<div class="score"><b>'+x.score+'</b><span>world<br>rating</span></div><div>'+
       '<div class="meta"><span class="cat">'+esc(x.cls.rule.label)+'</span><span>'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+
         (x.cas.killed?'<span class="fresh">'+x.cas.killed+' killed</span>':'')+'</div>'+
-      '<h3 class="hl"><a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
+      '<h3 class="hl">'+(x.s.orig?'<span class="eslang">'+esc((x.s.translated?"":"~")+"TR")+'</span> ':'')+'<a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
+      (x.s.orig?'<div class="esorig">'+esc(x.s.orig)+'</div>':'')+
       '<div class="src">'+esc([...x.s.sources].slice(0,4).join(", "))+'</div>'+
       '<div class="mkt">'+(names.length?'<span class="name">'+esc(names.join(" · "))+'</span>':'<span class="unsure">no country named</span>')+'</div>'+
       '<details class="whyscore"><summary>Why '+x.score+'</summary>'+x.why.filter(w=>w.label).map(w=>'<span>+'+w.n+' '+esc(w.label)+'</span>').join("")+'</details>'+
@@ -4438,6 +4542,14 @@ function init(){
   $("directMode").addEventListener("change",e=>{ DIRECT_MODE=e.target.checked; filtersSave(); setBusy(false); updateTargets(); });
   $("fastMode").addEventListener("change",e=>{ FAST_MODE=e.target.checked; filtersSave(); setBusy(false); });
   $("localMode").addEventListener("change",e=>{ LOCAL_MODE=e.target.checked; filtersSave(); setBusy(false); });
+  $("worldSurvey").addEventListener("click",async()=>{
+    if(busy) return;
+    const btn = $("worldSurvey");
+    busy = true; STOP = false; btn.disabled = true; btn.textContent = "Surveying…"; beginPull();
+    const n = await surveyWorldFeeds(msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Find a feed for every country";
+    progress(1,1,"World survey: "+Object.keys(WORLDFEED).length+" of "+Object.keys(WORLD_OUTLETS).length+" countries have their own feed ("+n+" new). Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
+  });
   $("surveyTop").addEventListener("click",async()=>{
     if(busy) return;
     if(!Object.keys(FEEDMAP).length){ progress(0,1,"Run the main survey first."); return; }
@@ -4750,7 +4862,7 @@ function init(){
     Object.values(PORTER).forEach(e=>{ if(NAME_MIGRATE[e.market]) e.market = NAME_MIGRATE[e.market]; });
     refreshRegionList(); updateTargets(); build(); render();
   });
-  keyUseLoad(); feedPathLoad(); feedMapLoad();
+  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad();
   keysLoad().then(()=>{
     ["newsdata","currents","gnews","rss2json"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
     renderHealth();
