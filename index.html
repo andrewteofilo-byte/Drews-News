@@ -112,6 +112,16 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .eslang{background:#8c7ae6;color:#0f1c2e;font-family:var(--body);font-size:11.5px;font-weight:700;border-radius:3px;padding:1px 5px;vertical-align:middle}
 .esorig{font-size:13px;color:var(--dim);font-style:italic;margin:-2px 0 4px}
 .dimtxt{color:var(--dim);font-weight:400}
+.usdesk{margin-top:6px;font-size:13px;padding:4px 9px;border-left:3px solid var(--dim);background:var(--row2)}
+.usdesk.l3{border-left-color:var(--tally);color:#ffb3ae}
+.usdesk.l2{border-left-color:var(--amber)}
+.devtag{background:#3a3160;color:#c7a8ff;border-radius:3px;padding:0 6px;font-weight:600}
+.sides{margin-top:7px;font-size:13.5px}
+.sides summary{cursor:pointer;color:var(--amber)}
+.side{padding:5px 0;border-bottom:1px solid #213b5c;display:flex;flex-direction:column;gap:2px}
+.side a{text-decoration:none}
+.side a:hover{text-decoration:underline}
+.sideflag{font-weight:600}
 .mkt .lt.night{color:#8c7ae6}
 .worldbar{display:flex;gap:12px;align-items:center;margin-bottom:10px;font-size:13px;color:var(--dim)}
 .worldbar input[type=range]{width:140px;vertical-align:middle}
@@ -4104,7 +4114,7 @@ function placeCountry(text){
 }
 /* what counts as significant, and how much */
 const WORLD_RULES = [
- {id:"war", label:"War / military", pts:34, re:/\b(air ?strike|missile (strike|attack|barrage)|shelling|offensive|invasion|incursion|drone (strike|attack)|ceasefire|truce|front line|captured the (city|town)|mobilisation|mobilization|war crimes?)\b/i},
+ {id:"war", label:"War / military", pts:34, re:/\b(air ?strike|missile (strike|attack|barrage)|shelling|offensive|invasion|incursion|drone (strike|attack)|cross-border (firing|shelling|raid)|exchange of fire|border clash\w*|troops (cross|enter)|ceasefire|truce|front line|captured the (city|town)|mobilisation|mobilization|war crimes?)\b/i},
  {id:"attack", label:"Attack / terror", pts:33, re:/\b(bomb(ing|er)?|suicide attack|car bomb|gunmen|militants|terror attack|hostage|mass shooting|stabbing spree|assassinat\w+|kidnapp\w+)\b/i},
  {id:"upheaval", label:"Political upheaval", pts:31, re:/\b(coup|ousted|impeach\w*|resign(s|ed|ation)|state of emergency|martial law|dissolv(es|ed) parliament|snap election|no[- ]confidence|seizes power|junta|sworn in as (president|prime minister))\b/i},
  {id:"disaster", label:"Natural disaster", pts:30, re:/\b(earthquake|magnitude \d|tsunami|volcan\w+|erupt\w+|cyclone|typhoon|hurricane|(severe |winter |tropical )?storm (damage|damages|batters|lashes|hits|leaves)|landslide|mudslide|avalanche|wildfire|bushfire|flash flood\w*|flood\w*|drought|famine|heatwave|cold snap)\b/i},
@@ -4404,7 +4414,8 @@ function buildWorld(got){
     const k = normKey(a.title);
     if(!k) return;
     let s = byKey.get(k);
-    if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set(), isos:new Set(), orig:a.orig||"", translated:!!a.translated}; byKey.set(k,s); }
+    if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set(), isos:new Set(), byCountry:new Map(), orig:a.orig||"", translated:!!a.translated}; byKey.set(k,s); }
+    if(a.iso && !s.byCountry.has(a.iso)) s.byCountry.set(a.iso, {title:a.orig||a.title, en:a.title, url:a.url, source:a.source});
     if(a.iso) s.isos.add(a.iso);
     if(a.orig && !s.orig){ s.orig = a.orig; s.translated = !!a.translated; }
     s.ms = Math.max(s.ms,a.ms);
@@ -4436,11 +4447,58 @@ function buildWorld(got){
     if(cls.second) add(4, "more than one kind of event");
     if(cs.length>1) add(4, "crosses "+cs.length+" countries");
     let score = Math.max(1, Math.min(99, Math.round(why.reduce((a,b)=>a+b.n,0))));
-    out.push({s, cls, countries:cs, score, ageMin, why, cas});
+    out.push({s, cls, countries:cs, score, ageMin, why, cas, tk:toks(s.title)});
   });
-  out.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
-  WORLD = out; WORLD_T = Date.now();
-  return out;
+  /* ---- the same story told by more than one country's newsroom ---- */
+  out.forEach(x=>{ x.sides = []; });
+  out.forEach((a,i)=>{
+    if(a.merged) return;
+    out.slice(i+1).forEach(b=>{
+      if(b.merged) return;
+      let shared = 0; a.tk.forEach(t=>{ if(b.tk.has(t)) shared++; });
+      if(shared < 3) return;
+      const newCountry = b.countries.some(c=>!a.countries.includes(c));
+      /* only interesting when the two accounts come from different countries' newsrooms */
+      const aIso = [...a.s.byCountry.keys()], bIso = [...b.s.byCountry.keys()];
+      if(!bIso.length || (!newCountry && !bIso.some(z=>!aIso.includes(z)))) return;
+      b.merged = true;
+      a.sides.push(b);
+      b.countries.forEach(c=>{ if(!a.countries.includes(c)) a.countries.push(c); });
+      a.score = Math.min(99, a.score + 3);
+    });
+  });
+  const all = out.filter(x=>!x.merged);
+  /* ---- new since your last pull, and still running from an earlier one ---- */
+  all.forEach(x=>{
+    const k = normKey(x.s.title).slice(0,50);
+    x.firstSeen = WORLD_SEEN[k] || Date.now();
+    x.isNew = !WORLD_SEEN[k] && WORLD_PULLS > 0;
+    x.developing = !!WORLD_SEEN[k] && (Date.now()-WORLD_SEEN[k]) > 45*60e3;
+    WORLD_SEEN[k] = x.firstSeen;
+    x.usDesk = usBreakIn(x);
+  });
+  WORLD_PULLS++;
+  all.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
+  WORLD = all; WORLD_T = Date.now();
+  return all;
+}
+const WORLD_SEEN = {};   /* headline -> when we first saw it */
+let WORLD_PULLS = 0;
+/* Would US networks break into programming? The National Desk rules, applied to a world story. */
+function usBreakIn(x){
+  const t = x.s.title+" "+[...x.s.sources].join(" ");
+  let level = 0, tag = "";
+  NAT_RULES.forEach(([re,lv,label])=>{
+    if(String(re).indexOf("__DEATH")>=0) return;
+    if(re.test(t) && lv>level){ level = lv; tag = label; }
+  });
+  if(x.cas.killed>=25 && level<3){ level = 3; tag = tag||"mass casualties"; }
+  else if(x.cas.killed>=8 && level<2){ level = 2; tag = tag||"deaths abroad"; }
+  if(x.cls.rule.id==="nuclear" && level<3) level = 3;
+  if(!level) return null;
+  return level>=3
+    ? {level, text:"US networks would likely break into programming for this"+(tag?" ("+tag+")":"")}
+    : {level, text:"Likely to lead US network newscasts, not a cut-in"};
 }
 function renderWorld(){
   const min = +($("worldMin")||{value:0}).value || 0;
@@ -4461,11 +4519,21 @@ function renderWorld(){
     const chips = x.countries.length ? bcastChips(x.countries.map(i=>COUNTRIES[i].i)) : "";
     return '<article class="story '+heat(x.score)+'">'+
       '<div class="score"><b>'+x.score+'</b><span>world<br>rating</span></div><div>'+
-      '<div class="meta"><span class="cat">'+esc(x.cls.rule.label)+'</span><span>'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+
+      '<div class="meta">'+(x.isNew?'<span class="newtag">New</span>':'')+(x.developing?'<span class="devtag">Developing · first seen '+ago((Date.now()-x.firstSeen)/60000)+'</span>':'')+
+        '<span class="cat">'+esc(x.cls.rule.label)+'</span><span>'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+
         (x.cas.killed?'<span class="fresh">'+x.cas.killed+' killed</span>':'')+'</div>'+
       '<h3 class="hl">'+(x.s.orig?'<span class="eslang">'+esc((x.s.translated?"":"~")+"TR")+'</span> ':'')+'<a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
       (x.s.orig?'<div class="esorig">'+esc(x.s.orig)+'</div>':'')+
       '<div class="src">'+esc([...x.s.sources].slice(0,4).join(", "))+'</div>'+
+      (x.usDesk?'<div class="usdesk l'+x.usDesk.level+'">'+esc(x.usDesk.text)+'</div>':'')+
+      (x.sides && x.sides.length ? '<details class="sides"><summary>How each side is reporting it</summary>'+
+        [x].concat(x.sides).map(v=>[...v.s.byCountry.entries()].map(([iso,e])=>{
+          const c = COUNTRIES.find(z=>z.i===iso);
+          return '<div class="side"><span class="sideflag">'+(c?CTRY_FLAG(c)+" "+esc(c.n):esc(iso))+'</span>'+
+                 '<a href="'+esc(e.url)+'" target="_blank" rel="noopener">'+esc(e.en||e.title)+'</a>'+
+                 (e.title && e.en && e.title!==e.en ? '<div class="esorig">'+esc(e.title)+'</div>' : '')+
+                 '<span class="dimtxt">'+esc(e.source||"")+'</span></div>';
+        }).join("")).join("")+'</details>' : '')+
       '<div class="mkt">'+(names.length?'<span class="name">'+esc(names.join(" · "))+'</span>':'<span class="unsure">no country named</span>')+
         (clock?'<span class="lt'+(clock.night?" night":"")+'">'+esc(clock.hhmm)+' there'+(clock.night?', overnight':'')+'</span>':'')+
         (chips?'<div class="stations">'+chips+'</div>':'')+'</div>'+
