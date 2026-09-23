@@ -2445,8 +2445,20 @@ function looksEnglish(t){
 async function translateBatch(texts){
   const todo = texts.filter(t=>!TRANS.has(t));
   if(!todo.length) return;
-  for(let i=0;i<todo.length;i+=20){
-    const chunk = todo.slice(i,i+20);
+  const chunks = [];
+  for(let i=0;i<todo.length;i+=20) chunks.push(todo.slice(i,i+20));
+  /* four at a time, so a free translator isn't hit with thirty requests at once */
+  let next = 0;
+  const worker = async () => {
+    while(next < chunks.length){
+      const chunk = chunks[next++];
+      await translateChunk(chunk);
+    }
+  };
+  await Promise.all(Array.from({length:Math.min(4,chunks.length)}, worker));
+}
+async function translateChunk(chunk){
+  {
     let done = false;
     /* Google's unkeyed endpoint takes the whole chunk in one request */
     try{
@@ -4047,7 +4059,7 @@ const WORLD_RULES = [
  {id:"war", label:"War / military", pts:34, re:/\b(air ?strike|missile (strike|attack|barrage)|shelling|offensive|invasion|incursion|drone (strike|attack)|ceasefire|truce|front line|captured the (city|town)|mobilisation|mobilization|war crimes?)\b/i},
  {id:"attack", label:"Attack / terror", pts:33, re:/\b(bomb(ing|er)?|suicide attack|car bomb|gunmen|militants|terror attack|hostage|mass shooting|stabbing spree|assassinat\w+|kidnapp\w+)\b/i},
  {id:"upheaval", label:"Political upheaval", pts:31, re:/\b(coup|ousted|impeach\w*|resign(s|ed|ation)|state of emergency|martial law|dissolv(es|ed) parliament|snap election|no[- ]confidence|seizes power|junta|sworn in as (president|prime minister))\b/i},
- {id:"disaster", label:"Natural disaster", pts:30, re:/\b(earthquake|magnitude \d|tsunami|volcan\w+|erupt\w+|cyclone|typhoon|hurricane|landslide|mudslide|avalanche|wildfire|bushfire|flash flood|floods?|drought|famine)\b/i},
+ {id:"disaster", label:"Natural disaster", pts:30, re:/\b(earthquake|magnitude \d|tsunami|volcan\w+|erupt\w+|cyclone|typhoon|hurricane|landslide|mudslide|avalanche|wildfire|bushfire|flash flood\w*|flood\w*|drought|famine|heatwave|cold snap)\b/i},
  {id:"crash", label:"Transport disaster", pts:29, re:/\b((plane|jet|airliner|aircraft|helicopter|cargo plane) (crash\w*|down|missing)|crash\w* (shortly )?after take ?off|train (derail\w*|crash\w*|collision)|derailment|ferry (sank|sink\w*|capsiz\w*)|boat capsiz\w*|migrant boat|bus plunge|pile-?up)\b/i},
  {id:"leader", label:"Leader / figure", pts:28, re:/\b((president|prime minister|king|queen|pope|chancellor|dictator|monarch|leader) .{0,20}(dies|dead|death|assassinated|shot|hospitalised|hospitalized)|state funeral|lies in state)\b/i},
  {id:"unrest", label:"Unrest / protest", pts:26, re:/\b(riot(s|ing)?|mass protests?|demonstrations|crackdown|curfew|clashes|tear gas|general strike|uprising|looting)\b/i},
@@ -4136,47 +4148,45 @@ async function surveyWorldFeeds(onProgress){
   worldFeedSave();
   return found;
 }
-async function readWorldFeeds(){
-  const isos = Object.keys(WORLDFEED).filter(i=>WORLDFEED[i].via!=="rss2json");
-  const r2j = Object.keys(WORLDFEED).filter(i=>WORLDFEED[i].via==="rss2json");
-  if((!isos.length && !r2j.length) || !PROXY_URL || !BATCH_OK) return [];
-  const out = [];
-  for(const iso of r2j){
-    const f = WORLDFEED[iso];
-    try{
-      let items = (await viaRss2json(f.url)).map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
-      const foreign = items.filter(i=>!looksEnglish(i.title));
-      if(foreign.length){
-        TRANS_FROM = f.lang && f.lang!=="en" ? f.lang : "auto";
-        const fixed = await withTranslation(foreign.map(i=>Object.assign(i,{es:true, orig:i.title})));
-        const byUrl = new Map(fixed.map(i=>[i.url,i]));
-        items = items.map(i=>byUrl.get(i.url)||i);
-      }
-      out.push(...items);
-    }catch(e){}
-  }
-  for(let i=0;i<isos.length;i+=25){
-    const slice = isos.slice(i,i+25);
-    let res = []; try{ res = await proxyBatch(slice.map(iso=>WORLDFEED[iso].url)); }catch(e){ continue; }
-    for(const r of res){
-      const iso = slice.find(x=>WORLDFEED[x].url===r.url); if(!iso) continue;
-      if(!r.ok || !r.body || !/<(rss|feed|item)[\s>]/i.test(r.body)) continue;
+async function readWorldFeeds(onBatch){
+  const isos = Object.keys(WORLDFEED);
+  if(!isos.length || !PROXY_URL || !BATCH_OK) return [];
+  const chunks = [];
+  for(let i=0;i<isos.length;i+=25) chunks.push(isos.slice(i,i+25));
+  let done = 0;
+  /* all the batches at once: the worker fetches them in parallel anyway */
+  const perChunk = await Promise.all(chunks.map(async slice=>{
+    let res = [];
+    try{ res = await proxyBatch(slice.map(iso=>WORLDFEED[iso].url)); }
+    catch(e){ HEALTH.world = HEALTH.world||{ok:0,fail:0,items:0}; HEALTH.world.fail++; HEALTH.world.last=(e&&e.message)||"failed"; }
+    const out = [];
+    res.forEach(r=>{
+      const iso = slice.find(x=>WORLDFEED[x].url===r.url); if(!iso) return;
+      if(!r.ok || !r.body || !/<(rss|feed|item)[\s>]/i.test(r.body)) return;
       const f = WORLDFEED[iso];
-      let items = parseRss(r.body).map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
-      /* judge the headline rather than trusting a label: an outlet's language isn't always its country's */
-      const foreign = items.filter(i=>!looksEnglish(i.title));
-      if(foreign.length){
-        TRANS_FROM = f.lang && f.lang!=="en" ? f.lang : "auto";
-        const fixed = await withTranslation(foreign.map(i=>Object.assign(i,{es:true, orig:i.title})));
-        const byUrl = new Map(fixed.map(i=>[i.url,i]));
-        items = items.map(i=>byUrl.get(i.url)||i);
-      }
-      out.push(...items);
-    }
-    HEALTH.world = HEALTH.world || {ok:0,fail:0,items:0};
-    HEALTH.world.ok++; HEALTH.world.items += out.length; renderHealth();
+      /* only the newest few from each country: enough for a world desk, a fraction of the work */
+      parseRss(r.body)
+        .filter(it=>it.date && Date.now()-it.date < 24*3600e3)
+        .sort((a,b)=>b.date-a.date).slice(0,12)
+        .forEach(it=>out.push({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
+    });
+    done += slice.length;
+    HEALTH.world = HEALTH.world||{ok:0,fail:0,items:0}; HEALTH.world.ok++; HEALTH.world.items += out.length;
+    renderHealth();
+    onBatch && onBatch(done, isos.length);
+    return out;
+  }));
+  let items = [].concat(...perChunk);
+  /* one translation pass for everything foreign, rather than one per country */
+  /* the newest foreign headlines only: the translator is free and unkeyed, so don't flood it */
+  const foreign = items.filter(i=>!looksEnglish(i.title)).sort((a,b)=>b.ms-a.ms).slice(0,200);
+  if(foreign.length){
+    TRANS_FROM = "auto";
+    const fixed = await withTranslation(foreign.map(i=>Object.assign(i,{es:true, orig:i.title})));
+    const byUrl = new Map(fixed.map(i=>[i.url,i]));
+    items = items.map(i=>byUrl.get(i.url)||i);
   }
-  return out;
+  return items;
 }
 function renderWorldCoverage(){
   const box = $("worldCover"); if(!box) return;
@@ -4200,11 +4210,14 @@ async function pWorldGoogle(){
   return items.map(i=>({title:cleanTitle(i.title,i.src), url:i.link, ms:i.date, source:i.src, srcUrl:i.srcUrl||i.link, desc:""}));
 }
 async function loadWorld(){
-  const got = [].concat(...await Promise.all([
-    run("gdelt",()=>pGdelt(WORLD_Q_GD,"24h")).catch(()=>[]),
+  const note = m => { const n = $("worldNote"); if(n) n.textContent = m; };
+  const parts = await Promise.all([
+    run("gdelt",()=>pGdelt(WORLD_Q_GD,"24h")).catch(()=>[]).then(r=>{ note("GDELT in, reading country feeds…"); return r; }),
     run("google",()=>pWorldGoogle()).catch(()=>[]),
-    readWorldFeeds().catch(()=>[])
-  ]));
+    readWorldFeeds((d,t)=>note("Read "+d+" of "+t+" countries…")).catch(()=>[])
+  ]);
+  note("");
+  const got = [].concat(...parts);
   const byKey = new Map();
   const now = Date.now();
   got.forEach(a=>{
