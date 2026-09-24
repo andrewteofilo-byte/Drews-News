@@ -112,6 +112,7 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .eslang{background:#8c7ae6;color:#0f1c2e;font-family:var(--body);font-size:11.5px;font-weight:700;border-radius:3px;padding:1px 5px;vertical-align:middle}
 .esorig{font-size:13px;color:var(--dim);font-style:italic;margin:-2px 0 4px}
 .dimtxt{color:var(--dim);font-weight:400}
+.leadtag{background:var(--amber);color:#0f1c2e;font-weight:700;border-radius:3px;padding:0 6px}
 .wcats{margin:6px 0}
 .worldbar2{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}
 .worldbar2 .search{max-width:330px}
@@ -3905,7 +3906,7 @@ function storyRow(x){
   return '<article class="story '+heat(x.score)+(x.old?" old":"")+'">'+
     '<div class="score"><b>'+x.score+'</b><span>must<br>watch</span></div>'+
     '<div>'+
-      '<div class="meta">'+(x.isNew?'<span class="newtag">New</span>':'')+'<span class="cat">'+esc(x.cls.rule.label)+'</span><span class="'+(x.ageMin<=30?"fresh":"")+'">'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+(x.merged>1?'<span>'+x.merged+' versions merged</span>':'')+'</div>'+
+      '<div class="meta">'+(x.s.leadIn&&x.s.leadIn.size?'<span class="leadtag">Leading in '+esc([...x.s.leadIn].map(z=>{const c=COUNTRIES.find(y=>y.i===z);return c?c.n:z;}).slice(0,2).join(", "))+'</span>':'')+(x.isNew?'<span class="newtag">New</span>':'')+'<span class="cat">'+esc(x.cls.rule.label)+'</span><span class="'+(x.ageMin<=30?"fresh":"")+'">'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+(x.merged>1?'<span>'+x.merged+' versions merged</span>':'')+'</div>'+
       '<h3 class="hl">'+(x.s.es?'<span class="eslang">ES</span> ':'')+'<a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
       (x.s.es && x.s.orig ? '<div class="esorig">'+esc(x.s.orig)+(x.s.translated?'':' · translator unavailable, read through a newsroom glossary')+'</div>' : '')+
       '<div class="src">'+esc(srcs+more)+'</div>'+bigTag+
@@ -4126,15 +4127,29 @@ const WORLD_RULES = [
  {id:"unrest", label:"Unrest / protest", pts:26, re:/\b(riot(s|ing)?|protest\w*|demonstrat\w+|crackdown|curfew|clashes|tear gas|general strike|uprising|looting|unrest)\b/i},
  {id:"fire", label:"Fire / rescue", pts:24, re:/\b(fire (breaks out|broke out|guts|destroys|rages|engulf\w*)|(warehouse|factory|market|hospital|school|apartment|tower|building) fire|blaze|firefighters|rescuers (search|dig)|trapped under rubble|search and rescue)\b/i},
  {id:"nuclear", label:"Nuclear / escalation", pts:32, re:/\b(nuclear (test|weapon|strike|threat|plant)|ballistic missile|icbm|uranium enrich\w+|radiation leak|reactor)\b/i},
+
+ {id:"industrial", label:"Industrial / mining", pts:27, re:/\b(mine (collapse|disaster|accident|blast)|miners trapped|refinery (fire|explosion|blast)|chemical plant|gas (blast|explosion)|factory (fire|collapse|blast)|pipeline (blast|rupture|explosion)|oil spill|dam (burst|collapse|failure))\b/i},
+ {id:"infra", label:"Infrastructure failure", pts:24, re:/\b(nationwide (blackout|outage)|power (cut|outage|blackout) (across|nationwide|hits)|grid (failure|collapse)|water (crisis|shortage|cut off)|internet (shutdown|blackout|cut)|airport (closed|shut|suspends)|airspace closed|port (closed|shut)|rail (network|services) (suspended|halted)|bridge (closed|collapse))\b/i},
+ {id:"crime", label:"Major crime", pts:25, re:/\b(mass kidnapping|abducted \d+|serial killer|manhunt|prison (break|riot|escape)|drug (raid|cartel|bust)|police (raid|operation) (kills|leaves)|gang (attack|violence|war)|bodies found)\b/i},
+
+ {id:"business", label:"Business / jobs", pts:22, re:/\b(bankrupt\w*|goes into administration|collapse of|airline (collapses|grounded|ceases)|mass layoffs|cuts? \d{3,} jobs|factory (closure|to close)|nationalis\w+|state bailout|major merger|takeover bid|shuts? down operations)\b/i},
+ {id:"migration", label:"Migration / border", pts:23, re:/\b(migrants?|asylum seekers?|refugees?|border (crisis|crossing|closure)|deportation|expels? migrants|boat (arrivals|intercepted)|camp (fire|raid|cleared))\b/i},
+ {id:"climate", label:"Climate / records", pts:21, re:/\b(record (heat|temperature|rainfall|snow|low|high)|hottest (day|month|year)|worst (drought|flooding|fires) (in|on record)|glacier|sea ice|climate summit|cop\d\d)\b/i},
+ {id:"space", label:"Space / science", pts:20, re:/\b(rocket launch|launches? (a )?(rocket|satellite)|space(craft|station)|lands? on the moon|lunar (mission|lander)|mars (rover|mission)|astronauts?|breakthrough (treatment|vaccine)|nobel prize)\b/i},
+ {id:"state", label:"State occasion", pts:21, re:/\b(state (visit|funeral|banquet)|coronation|royal (tour|visit)|papal (visit|mass)|pope (visits|arrives)|hajj|independence day celebrations|inauguration ceremony|lying in state)\b/i},
+ {id:"sport", label:"National sporting moment", pts:19, re:/\b(wins? the (world cup|olympic|africa cup|asian cup|euros)|olympic gold|world (title|record) (won|broken)|qualif\w+ for the world cup|hosts? the (olympics|world cup)|stadium (crush|disaster|collapse))\b/i},
+ {id:"politics", label:"National politics", pts:22, urg:true, re:/\b((wins?|won|loses?|lost) (the )?(election|vote|poll)|election (results?|victory|defeat|night)|exit poll|referendum|votes? to (approve|reject|ban)|parliament (approves|passes|rejects|dissolved)|cabinet (reshuffle|meets)|budget (passed|approved)|sworn in|inaugurat\w+|coalition (deal|collapse)|confidence vote|scandal|corruption (charges|inquiry|probe))\b/i},
  {id:"health", label:"Outbreak / health", pts:26, re:/\b(outbreak|epidemic|pandemic|ebola|cholera|bird flu|h5n1|measles outbreak|quarantine|who declares)\b/i},
  {id:"economy", label:"Economy / markets", pts:22, re:/\b(currency (collapse|crash)|default(s|ed)? on|bailout|hyperinflation|markets? (plunge|crash|tumble)|central bank (emergency|raises|cuts)|sanctions|trade war|tariffs?)\b/i},
  {id:"diplomacy", label:"Diplomacy", pts:20, re:/\b(summit|peace (deal|talks|agreement)|treaty|recalls? (its )?ambassador|expels? diplomats|un security council|emergency meeting|deal signed)\b/i},
  {id:"justice", label:"Courts / inquiry", pts:18, re:/\b(convicted|sentenced to|war crimes court|icc|international court|verdict|inquiry finds|tribunal)\b/i}
 ];
-const WORLD_NOT = /\b(recipe|celebrity|royal wedding|fashion|box office|transfer window|premier league|la liga|world cup qualifier|horoscope|review|opinion|column|sponsored|gift guide|betting|odds)\b/i;
+const WORLD_NOT = /\b(recipe|fashion week|box office|transfer window|premier league|la liga|serie a|bundesliga|friendly match|horoscope|film review|opinion|column|sponsored|gift guide|betting|odds|how to|listicle)\b/i;
+/* a national sporting moment still counts; the week-to-week league stuff doesn't */
+const WURG = /\b(breaking|live|developing|now|just in|today|tonight|announce\w*|declare\w*|says?|said|reports?|reported|after|amid|following|opens?|opened|begins?|sworn)\b/i;
 function classifyWorld(text){
   if(WORLD_NOT.test(text)) return null;
-  const hits = WORLD_RULES.filter(r=>r.re.test(text));
+  const hits = WORLD_RULES.filter(r=>r.re.test(text) && (!r.urg || WURG.test(text)));
   if(!hits.length) return null;
   hits.sort((a,b)=>b.pts-a.pts);
   return {rule:hits[0], second:hits[1]||null};
@@ -4261,7 +4276,8 @@ async function readWorldFeeds(onBatch){
       parseRss(r.body)
         .filter(it=>it.date && Date.now()-it.date < WORLD_WINDOW*3600e3)
         .sort((a,b)=>b.date-a.date).slice(0, WORLD_PER_COUNTRY)
-        .forEach(it=>out.push({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso}));
+        /* the first item in a country's own feed is what that newsroom is leading with */
+        .forEach((it,idx)=>out.push({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:f.name, srcUrl:"https://"+hostOf(f.url), desc:it.desc||"", iso, lead:idx===0}));
     });
     done += slice.length;
     HEALTH.world = HEALTH.world||{ok:0,fail:0,items:0}; HEALTH.world.ok++; HEALTH.world.items += out.length;
@@ -4462,6 +4478,7 @@ function buildWorld(got){
     let s = byKey.get(k);
     if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set(), isos:new Set(), byCountry:new Map(), orig:a.orig||"", translated:!!a.translated}; byKey.set(k,s); }
     if(a.iso && !s.byCountry.has(a.iso)) s.byCountry.set(a.iso, {title:a.orig||a.title, en:a.title, url:a.url, source:a.source});
+    if(a.lead && a.iso){ s.leadIn = s.leadIn || new Set(); s.leadIn.add(a.iso); }
     if(a.iso) s.isos.add(a.iso);
     if(a.orig && !s.orig){ s.orig = a.orig; s.translated = !!a.translated; }
     s.ms = Math.max(s.ms,a.ms);
@@ -4492,6 +4509,7 @@ function buildWorld(got){
     if(cas.injured>=20) add(5, cas.injured+" hurt");
     if(cls.second) add(4, "more than one kind of event");
     if(cs.length>1) add(4, "crosses "+cs.length+" countries");
+    if(s.leadIn && s.leadIn.size) add(6, "leading the bulletin in "+[...s.leadIn].map(z=>{ const c=COUNTRIES.find(y=>y.i===z); return c?c.n:z; }).join(", "));
     let score = Math.max(1, Math.min(99, Math.round(why.reduce((a,b)=>a+b.n,0))));
     out.push({s, cls, countries:cs, score, ageMin, why, cas, tk:toks(s.title)});
   });
