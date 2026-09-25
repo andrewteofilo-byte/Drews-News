@@ -277,6 +277,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <button class="chip" data-min="60" aria-pressed="false">60+ lead story</button>
       <button class="chip" data-min="80" aria-pressed="false">80+ cut in</button>
     </div>
+    <p class="lab" style="margin-top:10px">Time zone</p>
+    <div class="chips" id="zones"></div>
     <label class="lab" for="size" style="margin-top:10px">Market size</label>
     <select id="size" class="full">
       <option value="any">Any market</option>
@@ -291,6 +293,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <option value="outlets">Most outlets</option>
       <option value="market">Biggest market</option>
       <option value="aironce">Newscast soonest</option>
+      <option value="zone">Time zone, east to west</option>
     </select>
     <label class="toggle"><input type="checkbox" id="showBig" checked><span>Keep big stories from the last 24 hours (deaths, several outlets, or national pickup)</span></label>
     <label class="toggle"><input type="checkbox" id="fOnair"><span>Only markets with a newscast on air now</span></label>
@@ -3828,13 +3831,38 @@ const CAT_ON = new Set(RULES.map(r=>r.id));
 let MIN = 0, QTXT = "";
 const FLAGS = {onair:false, reported:false, pinned:false, unseen:false};
 let SIZE = "any", SORT = "rating";
+/* US time zones, east to west, for filtering and grouping the local board */
+const ZONES = [
+  ["ET","Eastern","America/New_York"],
+  ["CT","Central","America/Chicago"],
+  ["MT","Mountain","America/Denver"],
+  ["AZ","Arizona","America/Phoenix"],
+  ["PT","Pacific","America/Los_Angeles"],
+  ["AK","Alaska","America/Anchorage"],
+  ["HI","Hawaii","Pacific/Honolulu"]
+];
+const TZ_ZONE = {"America/New_York":"ET","America/Detroit":"ET","America/Indiana/Indianapolis":"ET",
+  "America/Chicago":"CT","America/Denver":"MT","America/Boise":"MT","America/Phoenix":"AZ",
+  "America/Los_Angeles":"PT","America/Anchorage":"AK","America/Juneau":"AK","Pacific/Honolulu":"HI"};
+const zoneOf = d => TZ_ZONE[d.tz] || "CT";
+const ZONE_ON = new Set();     /* empty means every zone */
+function zoneClock(z){
+  const row = ZONES.find(x=>x[0]===z);
+  if(!row) return "";
+  try{ return new Intl.DateTimeFormat("en-US",{timeZone:row[2],hour:"numeric",minute:"2-digit"}).format(new Date(window.DS_TESTNOW||Date.now())); }
+  catch(e){ return ""; }
+}
 const SIZE_TEST = {any:()=>true, top25:r=>r<=25, mid:r=>r>25&&r<=100, small:r=>r>100};
 const SORTS = {
   rating: (a,b)=>b.score-a.score || a.ageMin-b.ageMin,
   newest: (a,b)=>a.ageMin-b.ageMin,
   outlets:(a,b)=>b.s.sources.size-a.s.sources.size || b.score-a.score,
   market: (a,b)=>((a.dma!=null?DMAS[a.dma].rank:999)-(b.dma!=null?DMAS[b.dma].rank:999)) || b.score-a.score,
-  aironce:(a,b)=>airIn(a)-airIn(b) || b.score-a.score
+  aironce:(a,b)=>airIn(a)-airIn(b) || b.score-a.score,
+  zone:(a,b)=>{
+    const zi = x => x.dma!=null ? ZONES.findIndex(z=>z[0]===zoneOf(DMAS[x.dma])) : 99;
+    return zi(a)-zi(b) || b.score-a.score;
+  }
 };
 function airIn(x){
   if(x.dma==null) return 9999;
@@ -3843,7 +3871,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -3906,6 +3934,7 @@ function passesExceptCats(x){
   if(FLAGS.unseen && !x.isNew) return false;
   if(FLAGS.onair && !(d && d.all.some(s=>statusOf(s, d.tz).state==="on"))) return false;
   if(SIZE!=="any" && !(d && SIZE_TEST[SIZE](d.rank))) return false;
+  if(ZONE_ON.size && !(d && ZONE_ON.has(zoneOf(d)))) return false;
   const terms = parseTerms(QTXT);
   if(terms.length && !terms.every(t=>termHits(x,t))) return false;
   return true;
@@ -4030,7 +4059,7 @@ function render(){
       const d = DMAS[id], g = groups[id];
       const rep = g.find(x=>x.repCall);
       const top = Math.min(99, g[0].score + Math.min(15,(g.length-1)*5));
-      return '<section class="group '+heat(top)+'"><header><button class="star" data-pin="'+esc(d.m)+'" aria-pressed="'+PINS.has(d.m)+'" title="Pin this market">'+(PINS.has(d.m)?"★":"☆")+'</button><h3>'+esc(d.m)+'</h3><span class="lt">'+esc(localTime(d.tz))+'</span>'+onAir(d)+'<span class="lt">market rating '+top+' · '+g.length+' stor'+(g.length===1?"y":"ies")+'</span><div class="stations">'+stationChips(d, rep?rep.repCall:null)+'</div></header><ul>'+
+      return '<section class="group '+heat(top)+'"><header><button class="star" data-pin="'+esc(d.m)+'" aria-pressed="'+PINS.has(d.m)+'" title="Pin this market">'+(PINS.has(d.m)?"★":"☆")+'</button><h3>'+esc(d.m)+'</h3><span class="lt">'+esc(localTime(d.tz))+' · '+esc(zoneOf(d))+'</span>'+onAir(d)+'<span class="lt">market rating '+top+' · '+g.length+' stor'+(g.length===1?"y":"ies")+'</span><div class="stations">'+stationChips(d, rep?rep.repCall:null)+'</div></header><ul>'+
         g.map(x=>'<li><b>'+x.score+'</b><div><a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a><div class="meta"><span class="cat">'+esc(x.cls.rule.label)+'</span>'+(x.big?'<span class="bigdot">'+(x.old?"still big":"big")+'</span>':'')+'<span>'+ago(x.ageMin)+'</span><span>'+esc([...x.s.sources].slice(0,3).join(", "))+'</span></div></div></li>').join("")+
         '</ul></section>';
     }).join("");
@@ -4901,6 +4930,7 @@ function clearFilters(){
   document.querySelectorAll("#cats .chip").forEach(b=>b.setAttribute("aria-pressed","true"));
   MIN = 0; $("minScore").value = 0; $("minv").textContent = "0"; syncRatingChips();
   SIZE = "any"; $("size").value = "any";
+  ZONE_ON.clear(); document.querySelectorAll("#zones .chip").forEach(b=>b.setAttribute("aria-pressed","false"));
   QTXT = ""; $("q").value = "";
   Object.keys(FLAGS).forEach(k=>{ FLAGS[k] = false; });
   ["fOnair","fReported","fPinned","fUnseen"].forEach(id=>{ $(id).checked = false; });
@@ -5006,6 +5036,21 @@ function init(){
     syncRatingChips(); filtersSave(); render();
   });
   $("size").addEventListener("change",e=>{ SIZE=e.target.value; filtersSave(); render(); });
+  const drawZones = () => {
+    $("zones").innerHTML = ZONES.map(([code,label])=>{
+      const n = DMAS.filter(d=>zoneOf(d)===code).length;
+      return '<button class="chip" aria-pressed="'+ZONE_ON.has(code)+'" data-zone="'+code+'" title="'+n+' markets">'+label+'<b class="cnt"> '+zoneClock(code)+'</b></button>';
+    }).join("");
+  };
+  drawZones();
+  $("zones").addEventListener("click",e=>{
+    const b = e.target.closest(".chip"); if(!b) return;
+    const z = b.dataset.zone;
+    ZONE_ON.has(z) ? ZONE_ON.delete(z) : ZONE_ON.add(z);
+    drawZones(); filtersSave(); render();
+  });
+  /* the clocks on the chips refresh when you come back to the page */
+  window.addEventListener("focus", drawZones);
   $("useYahoo").addEventListener("change",e=>{ useYahoo=e.target.checked; filtersSave(); });
   $("useLocal").addEventListener("change",e=>{ USE_LOCAL=e.target.checked; filtersSave(); });
   $("useSpanish").addEventListener("change",e=>{ USE_SPANISH=e.target.checked; filtersSave(); });
@@ -5380,6 +5425,7 @@ function init(){
     if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
     if(f.worldWin) WORLD_WINDOW = +f.worldWin;
     if(typeof f.localMode==="boolean"){ LOCAL_MODE=f.localMode; $("localMode").checked=f.localMode; setBusy(false); }
+    if(Array.isArray(f.zones)){ ZONE_ON.clear(); f.zones.forEach(z=>ZONE_ON.add(z)); }
     if(f.size && SIZE_TEST[f.size]){ SIZE=f.size; $("size").value=f.size; }
     if(f.sort && SORTS[f.sort]){ SORT=f.sort; $("sort").value=f.sort; }
     if(Array.isArray(f.slots)){
