@@ -134,6 +134,11 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .errline{grid-column:1 / -1;font-size:12px;color:#ff9d97;word-break:break-word;margin:-1px 0 4px}
 .ktest{font-size:12.5px;margin:4px 0;word-break:break-word}
 .ktest.ok{color:var(--nbc)} .ktest.bad{color:#ff9d97} .ktest.off{color:var(--dim)}
+.dullrow{display:grid;grid-template-columns:44px 1fr;gap:10px;padding:8px 12px;background:var(--row);border-left:3px solid #4a5f7d;margin-bottom:4px}
+.dullrow b{font-family:var(--display);font-size:22px;color:var(--dim);text-align:center}
+.dullrow a{text-decoration:none}
+.dullrow a:hover{text-decoration:underline}
+.dullrow .quiet{color:var(--amber);font-weight:600}
 .whyscore{margin-top:6px;font-size:12.5px;color:var(--dim)}
 .whyscore summary{cursor:pointer}
 .whyscore span{display:inline-block;margin:3px 10px 0 0;white-space:nowrap}
@@ -299,6 +304,11 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="fOnair"><span>Only markets with a newscast on air now</span></label>
     <label class="toggle"><input type="checkbox" id="fReported"><span>Only stories a local station is already on</span></label>
     <label class="toggle"><input type="checkbox" id="fPinned"><span>Only pinned markets</span></label>
+    <label class="toggle"><input type="checkbox" id="showBoring" checked><span>Show the boring desk (ribbon cuttings, council votes, fair week)</span></label>
+    <details class="typebox" id="dullbox">
+      <summary id="dullsum">Boring types</summary>
+      <div class="chips" id="dulls"></div>
+    </details>
     <label class="toggle"><input type="checkbox" id="fUnseen"><span>Only what is new since the last pull</span></label>
     <label class="toggle"><input type="checkbox" id="useYahoo"><span>Also try Yahoo News (blocked more often than not)</span></label>
     <label class="toggle"><input type="checkbox" id="localMode"><span>Local mode: one proven station feed for all 210 markets, plus one Google search — purely local</span></label>
@@ -373,6 +383,10 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
   <div id="list">
     <div class="empty"><b>Tap Sweep all markets</b>Pulls the last three hours of local breaking news, plus anything big from the last 24, and shows which stations in each market would carry it. Nothing refreshes on its own.</div>
   </div>
+  <details class="unplaced" id="boringBox" hidden>
+    <summary id="boringSum">Boring desk</summary>
+    <div id="boring"></div>
+  </details>
   <details class="unplaced" id="unplacedBox" hidden>
     <summary id="unplacedSum">Couldn't place in a market</summary>
     <div id="unplaced"></div>
@@ -1790,6 +1804,10 @@ const RULES = [
  {id:"mass", label:"Mass casualty", pts:34, major:true, re:/\b(mass shooting|mass casualty|multiple (people )?(killed|dead|shot|injured|hurt)|several (people )?(killed|dead|shot)|death toll)\b/i},
  {id:"aircraft", label:"Aircraft crash", pts:31, major:true, re:/\b((helicopter|plane|aircraft|chopper|jet|air ambulance)s? (crash\w*|went down|goes down|down)|(helicopter|plane|aircraft) crash|small plane|midair collision|mid-air collision)\b/i},
  {id:"manhunt", label:"Manhunt / standoff", pts:32, major:true, re:/\b(manhunt|standoff|barricaded|swat (team|standoff|situation|called)|shelter[- ]in[- ]place|armed and dangerous|active shooter|hostage)\b/i},
+
+ {id:"responder", label:"First responder down", pts:33, major:true, re:/\b((officer|deputy|trooper|firefighter|paramedic|medic|dispatcher|chief) (shot|killed|struck|hit|injured|hurt|down|in critical|ambushed)|line[- ]of[- ]duty|(officer|firefighter|deputy) (dies|died|killed) (in|while|after)|fallen (officer|firefighter)|procession for)\b/i},
+ {id:"immigration", label:"Immigration enforcement", pts:28, re:/\b(ice (raid|agents|operation|detains|arrests|checkpoint)|immigration (raid|agents|enforcement|checkpoint|sweep)|border patrol (checkpoint|agents|operation)|detained by ice|workplace raid|deportation (flight|raid)|federal agents detain)\b/i},
+ {id:"heatcold", label:"Heat / cold emergency", pts:24, re:/\b(excessive heat (warning|watch|advisory)|heat (emergency|advisory|deaths?)|cooling (center|centre|shelter)s?( open)?|warming (center|centre|shelter)s?( open)?|hard freeze (warning|watch)|wind chill (warning|advisory)|pipes burst|water main breaks? amid|boil (water )?notice after freeze|shelters open (for|amid) (the )?(heat|cold))\b/i},
  {id:"police", label:"Police incident", pts:26, re:/\b(police chase|police pursuit|high[- ]speed (chase|pursuit)|officer[- ]involved|officer shot|deput(y|ies) shot|trooper shot|heavy police presence|police activity|shots fired)\b/i},
  {id:"violent", label:"Violent crime", pts:26, re:/\b(shooting|shot and killed|shot dead|fatally shot|gunfire|stabb(ed|ing)|homicide|murder(ed)?)\b/i},
  {id:"hazmat", label:"Explosion / hazmat", pts:26, major:true, re:/\b(explosion|exploded|hazmat|hazardous materials?|chemical (leak|spill|release)|gas leak)\b/i},
@@ -1826,6 +1844,37 @@ function casualties(text){
   if(t) killed = Math.max(killed,+t[1]);
   return {killed, injured};
 }
+/* ================= THE BORING DESK =================
+   Station feeds carry everything a newsroom publishes, so what the breaking test rejects is the
+   rest of the rundown: ribbon cuttings, council votes, fair week. Rated for dullness instead, and
+   a market showing only these is a quiet market. Funerals, memorials and anything about a death
+   stay out of it. */
+const BORING_OUT = /\b(memorial service|celebration of life|funeral|obituar\w*|passed away|died|dies|killed|fatal|body|victim|abuse|assault)\b/i;
+const BORING = [
+ {id:"ribbon", label:"Ribbon cutting", dull:95, re:/\b(ribbon[- ]cutting|grand opening|opens its doors|officially opens|now open|unveil(s|ed|ing)|breaks? ground|groundbreaking|dedication ceremony)\b/i},
+ {id:"meeting", label:"Meeting / vote", dull:92, re:/\b(city council|county commission\w*|school board|board (votes|approves|meets)|council (votes|approves|meets)|ordinance|zoning|public hearing|budget (approved|proposal|hearing)|tax rate)\b/i},
+ {id:"proclaim", label:"Award / proclamation", dull:88, re:/\b(awareness (month|week|day)|proclamation|named .{0,25}of the year|honou?red (for|with)|recognized for|scholarship|hall of fame induction|teacher of the (month|year)|employee of the)\b/i},
+ {id:"roadwork", label:"Planned roadwork", dull:86, re:/\b(road work|roadwork|lane closures? (planned|begin|scheduled)|construction (begins|to begin|project)|detour (begins|planned)|bridge work|paving)\b/i},
+ {id:"charity", label:"Fundraiser / drive", dull:84, re:/\b(fundrais\w*|charity|food drive|blood drive|toy drive|donat(es|ed|ion)|benefit (concert|dinner)|volunteers? (needed|gather)|nonprofit)\b/i},
+ {id:"feature", label:"Feature / human interest", dull:82, re:/\b(celebrat(es|ing) \d+ years|\d+(st|nd|rd|th) birthday|pet of the (week|day)|good news|heartwarming|surprise(d|s)? (visit|party)|reunited|viral|local (student|teacher|business owner) )/i},
+ {id:"business", label:"Business / jobs", dull:80, re:/\b(job fair|now hiring|hiring event|store closing|expansion|new location|opening a second|franchise|small business (spotlight|saturday))\b/i},
+ {id:"forecast", label:"Forecast talk", dull:78, re:/\b(forecast|warm(ing)? up|cold front|rain chances|temperatures? (drop|climb|stay)|first freeze|pollen|heat index|nice weather)\b/i},
+ {id:"event", label:"Festival / event", dull:76, re:/\b(festival|parade|county fair|state fair|carnival|rodeo|homecoming|farmers market|craft show|car show|fireworks show)\b/i},
+ {id:"anniversary", label:"Anniversary / look back", dull:74, re:/\b(anniversary|\d+ years (ago|later|on)|look back|remembering|throwback|history of)\b/i},
+ {id:"sport", label:"Sport", dull:70, re:/\b(football|basketball|baseball|softball|volleyball|soccer|playoffs?|tournament|scoreboard|quarterback|coach|signing day|game of the week)\b/i},
+ {id:"consumer", label:"Consumer / study", dull:66, re:/\b(recalled?|gas prices|survey (finds|shows)|study (finds|shows)|report finds|ranked|cheapest|most expensive|scam warning)\b/i},
+ {id:"court", label:"Court follow-up", dull:58, re:/\b(sentenced|pleads? (guilty|not guilty)|plea deal|indicted|arraign\w*|trial (begins|continues|set)|verdict|convicted|lawsuit|settlement|appeal)\b/i}
+];
+function classifyBoring(text){
+  if(BORING_OUT.test(text)) return null;
+  const hits = BORING.filter(r=>r.re.test(text));
+  if(!hits.length) return null;
+  hits.sort((a,b)=>b.dull-a.dull);
+  return hits[0];
+}
+let BORING_LIST = [];
+let SHOW_BORING = true;
+const BORING_ON = new Set(BORING.map(r=>r.id));
 function classify(text){
   if(BLOCK_HARD.test(text)) return null;
   const hits = RULES.filter(r => r.re.test(text) && (!r.urg || URG.test(text)));
@@ -3703,10 +3752,28 @@ function build(){
 
   /* 2. classify and place each headline */
   const items = [];
+  const dull = [];
   byKey.forEach(s=>{
     const text = [...s.texts].join(" ");
     const cls = classify(text);
-    if(!cls) return;
+    if(!cls){
+      const b = classifyBoring(text);
+      if(b){
+        let stDma = null, stCall = null;
+        for(const c of s.calls){ if(CALL[c]!=null){ stDma = CALL[c]; stCall = c; break; } }
+        const pl = placeStory(text + " " + [...s.sources].join(" "), stDma);
+        let dma = pl.dma;
+        if(dma==null && s.scanDmas.size){
+          const hit = pl.cands.filter(c=>s.scanDmas.has(c));
+          if(hit.length===1) dma = hit[0];
+        }
+        /* several outlets on the same dull story makes it slightly less dull */
+        const score = Math.max(20, Math.min(99, b.dull - Math.min(20,(s.sources.size-1)*6)));
+        dull.push({rule:b, dma, repCall: dma===stDma ? stCall : null, score,
+                   ageMin:(Date.now()-s.ms)/60000, title:s.title, url:s.url, sources:s.sources, ms:s.ms});
+      }
+      return;
+    }
     let stationDma = null, repCall = null;
     for(const c of s.calls){ if(CALL[c]!=null){ stationDma = CALL[c]; repCall = c; break; } }
     /* Gray (and other groups) republish each other's stories. Signs of that: the same headline in
@@ -3818,6 +3885,8 @@ function build(){
   const pin = x => x.dma!=null && PINS.has(DMAS[x.dma].m) ? 1 : 0;
   out.sort((a,b)=>pin(b)-pin(a) || b.score-a.score || a.ageMin-b.ageMin);
   STORIES = out;
+  dull.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
+  BORING_LIST = dull;
 }
 /* keys seen before the latest pull, frozen per pull so re-renders don't clear New badges */
 const SEEN_ALL = new Set();
@@ -3871,7 +3940,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {boring:SHOW_BORING, dulls:[...BORING_ON], zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -4065,6 +4134,7 @@ function render(){
     }).join("");
   }
   renderFilters();
+  renderBoring();
   $("unplacedBox").hidden = !unplaced.length || VIEW==="porter" || VIEW==="world";
   $("unplacedSum").textContent = unplaced.length+" stor"+(unplaced.length===1?"y":"ies")+" couldn't be placed in a market";
   $("unplaced").innerHTML = unplaced.slice(0,60).map(storyRow).join("");
@@ -4884,6 +4954,9 @@ function rundownText(){
   const nd = natState.checked ? natDoctrineBN() : null;
   const extraTags = natState.tags.filter(t=>!nd || !nd.t.includes(t));
   const natHead = nd ? "\nNATIONAL DESK: "+nd.t+(extraTags.length?" ("+extraTags.join(", ")+")":"")+(natState.heads[0]?" · "+natState.heads[0]:"") : "";
+  const dullTxt = SHOW_BORING && boringVisible().length
+    ? "\n\nBORING DESK\n"+boringVisible().slice(0,15).map(b=>"["+b.score+" dull] "+(b.dma!=null?DMAS[b.dma].m:"market unclear")+" · "+b.rule.label+" · "+b.title).join("\n")
+    : "";
   return head+natHead+"\n\n"+vis.slice(0,25).map(x=>{
     const d = DMAS[x.dma];
     const stns = d.all.map(st=>{
@@ -4894,7 +4967,7 @@ function rundownText(){
     const air = slotFor(d, SLOT_ON.size?SLOT_ON:null);
     return "["+x.score+"] "+d.m+" · "+x.cls.rule.label+" · "+ago(x.ageMin)+(x.big?" · "+(x.old?"STILL BIG":"BIG")+" ("+x.bigWhy.join(", ")+")":"")+(air?" · "+air.label+" window":"")+
       "\n"+x.s.title+(x.s.es&&x.s.orig?"\n("+x.s.orig+")":"")+"\n"+stns+"\n"+x.s.url;
-  }).join("\n\n");
+  }).join("\n\n")+dullTxt;
 }
 async function copyText(txt, btn){
   let ok = false;
@@ -4913,6 +4986,42 @@ function syncViewButtons(){
 
 function syncRatingChips(){
   document.querySelectorAll("#ratings .chip").forEach(b=>b.setAttribute("aria-pressed", +b.dataset.min===MIN));
+}
+function boringVisible(){
+  const terms = parseTerms(QTXT);
+  return BORING_LIST.filter(b=>{
+    if(!BORING_ON.has(b.rule.id)) return false;
+    const d = b.dma!=null ? DMAS[b.dma] : null;
+    if(REGION_ONLY && REGION!=="ALL" && !(d && inRegion(d))) return false;
+    if(FLAGS.pinned && !(d && PINS.has(d.m))) return false;
+    if(SIZE!=="any" && !(d && SIZE_TEST[SIZE](d.rank))) return false;
+    if(ZONE_ON.size && !(d && ZONE_ON.has(zoneOf(d)))) return false;
+    if(terms.length){
+      const hay = (b.title+" "+[...b.sources].join(" ")+" "+b.rule.label+" "+(d?d.m+" "+d.city:"")).toLowerCase();
+      if(!terms.every(t=>hay.includes(t))) return false;
+    }
+    return true;
+  });
+}
+function renderBoring(){
+  const list = SHOW_BORING ? boringVisible() : [];
+  $("boringBox").hidden = !list.length || VIEW==="porter" || VIEW==="world";
+  $("dullsum") && ($("dullsum").textContent = "Boring types · "+BORING_ON.size+" of "+BORING.length+" on");
+  if(!list.length) return;
+  const quiet = new Set(list.filter(b=>b.dma!=null).map(b=>b.dma));
+  visible().forEach(x=>quiet.delete(x.dma));
+  $("boringSum").textContent = "Boring desk · "+list.length+" stor"+(list.length===1?"y":"ies")+" filling the rest of the rundown"+
+    (quiet.size?" · "+quiet.size+" market"+(quiet.size===1?"":"s")+" with nothing else":"");
+  $("boring").innerHTML = list.slice(0,80).map(b=>{
+    const d = b.dma!=null ? DMAS[b.dma] : null;
+    const nothing = d && quiet.has(b.dma);
+    return '<div class="dullrow"><b>'+b.score+'</b><div>'+
+      '<div class="meta"><span class="cat">'+esc(b.rule.label)+'</span><span>'+ago(b.ageMin)+'</span>'+
+        (d?'<span>'+esc(d.m)+'</span>':'<span>market unclear</span>')+
+        (b.repCall?'<span>'+esc(b.repCall)+'</span>':'')+
+        (nothing?'<span class="quiet">quiet market</span>':'')+'</div>'+
+      '<a href="'+esc(b.url)+'" target="_blank" rel="noopener">'+esc(b.title)+'</a></div></div>';
+  }).join("");
 }
 function renderFilters(){
   const counts = catCounts();
@@ -5036,6 +5145,15 @@ function init(){
     syncRatingChips(); filtersSave(); render();
   });
   $("size").addEventListener("change",e=>{ SIZE=e.target.value; filtersSave(); render(); });
+  $("dulls").innerHTML = BORING.map(r=>'<button class="chip" aria-pressed="true" data-dull="'+r.id+'">'+esc(r.label)+'</button>').join("");
+  $("dulls").addEventListener("click",e=>{
+    const b = e.target.closest(".chip"); if(!b) return;
+    const on = b.getAttribute("aria-pressed")!=="true";
+    b.setAttribute("aria-pressed", on);
+    on ? BORING_ON.add(b.dataset.dull) : BORING_ON.delete(b.dataset.dull);
+    filtersSave(); render();
+  });
+  $("showBoring").addEventListener("change",e=>{ SHOW_BORING=e.target.checked; filtersSave(); render(); });
   const drawZones = () => {
     $("zones").innerHTML = ZONES.map(([code,label])=>{
       const n = DMAS.filter(d=>zoneOf(d)===code).length;
@@ -5425,6 +5543,11 @@ function init(){
     if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
     if(f.worldWin) WORLD_WINDOW = +f.worldWin;
     if(typeof f.localMode==="boolean"){ LOCAL_MODE=f.localMode; $("localMode").checked=f.localMode; setBusy(false); }
+    if(typeof f.boring==="boolean"){ SHOW_BORING=f.boring; $("showBoring").checked=f.boring; }
+    if(Array.isArray(f.dulls)){
+      BORING_ON.clear(); f.dulls.forEach(x=>BORING_ON.add(x));
+      document.querySelectorAll("#dulls .chip").forEach(b=>b.setAttribute("aria-pressed", BORING_ON.has(b.dataset.dull)));
+    }
     if(Array.isArray(f.zones)){ ZONE_ON.clear(); f.zones.forEach(z=>ZONE_ON.add(z)); }
     if(f.size && SIZE_TEST[f.size]){ SIZE=f.size; $("size").value=f.size; }
     if(f.sort && SORTS[f.sort]){ SORT=f.sort; $("sort").value=f.sort; }
