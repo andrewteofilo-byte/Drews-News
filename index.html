@@ -349,6 +349,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <div id="passReport"></div>
     <button class="btn wide" id="worldSurvey">Find a feed for every country</button>
     <button class="btn wide" id="worldAfrica">Fill African gaps with AllAfrica</button>
+    <button class="btn wide" id="netSurvey">Check the network feeds</button>
+    <div id="netCover"></div>
     <button class="btn wide" id="wireSurvey">Check the wires and regional feeds</button>
     <div id="worldCover"></div>
     <p class="lab" style="margin-top:10px">Every feed being read</p>
@@ -373,6 +375,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <div class="views" role="group" aria-label="View">
       <button id="vStory" aria-pressed="true">By story</button>
       <button id="vMarket" aria-pressed="false">By market</button>
+      <button id="vNet" aria-pressed="false">Networks</button>
       <button id="vWorld" aria-pressed="false">World</button>
       <button id="vPorter" aria-pressed="false">Porter log</button>
     </div>
@@ -1893,7 +1896,7 @@ let SHOW_BIG = true;
 const CACHE = new Map();
 const CACHE_TTL = 10*60e3;
 const HEALTH = {};
-const PROVIDER_NAMES = {gapfill:"Google country editions",wire:"Wires and regionals",world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
+const PROVIDER_NAMES = {network:"Networks",gapfill:"Google country editions",wire:"Wires and regionals",world:"Country outlets",paper:"Newspapers",proxy:"Your proxy",google:"Google News",bing:"Bing News",geo:"Google local edition",station:"Station feeds",spanish:"Spanish desk",yahoo:"Yahoo News",newsdata:"NewsData.io",currents:"Currents","gnews.io":"GNews.io"};
 Object.keys(PROVIDER_NAMES).forEach(k=>HEALTH[k]={ok:0,fail:0,items:0});
 let STOP = false;
 
@@ -4109,7 +4112,8 @@ function render(){
                     'The relays answered earlier, so they are probably rate-limiting you. Wait a minute and sweep again.')+'</div>'
     : "";
 
-  if(VIEW==="world"){ renderWorld(); }
+  if(VIEW==="networks"){ renderNetworkView(); }
+  else if(VIEW==="world"){ renderWorld(); }
   else if(VIEW==="porter"){ renderPorter(); }
   else if(!lastRun){ /* keep the welcome block */ }
   else if(!placed.length){
@@ -4797,6 +4801,149 @@ function renderWorld(){
   $("list").innerHTML = head + chips + '<p class="hint" id="worldNote"></p>' + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":(Object.keys(WORLDFEED).length?"Tap Pull world desk to start":"No country feeds yet"))+'</b>'+(Object.keys(WORLDFEED).length?"Read straight from "+Object.keys(WORLDFEED).length+" countries' own newsrooms. Nothing is fetched until you ask.":"Run \"Find a feed for every country\" in the sidebar first — the world desk reads each country's own newsroom, nothing else.")+'</div>');
 }
 
+/* ================= THE NETWORKS =================
+   The four networks' own feeds, read directly. How many of them are carrying the same story is a
+   far better cut-in signal than guessing from a search: one network is a story, all four is a
+   special report. */
+const NET_FEEDS = {
+  ABC:["https://feeds.abcnews.com/abcnews/topstories","https://abcnews.go.com/abcnews/topstories"],
+  CBS:["https://www.cbsnews.com/latest/rss/main","https://www.cbsnews.com/latest/rss/us"],
+  NBC:["https://feeds.nbcnews.com/nbcnews/public/news","https://feeds.nbcnews.com/nbcnews/public/top-stories"],
+  FOX:["https://moxie.foxnews.com/google-publisher/latest.xml","https://moxie.foxnews.com/google-publisher/us.xml"]
+};
+const NETFEED_KEY = "ds-hyperlocal-netfeeds";
+let NETFEEDS = {};       /* ABC -> url that worked */
+let NETSTORIES = [];     /* what the networks are carrying */
+let NET_T = 0;
+function netFeedLoad(){ return storeGet(NETFEED_KEY,{}).then(v=>{ NETFEEDS = v||{}; renderNetCoverage(); }); }
+async function surveyNetworks(onProgress){
+  const tries = [];
+  Object.keys(NET_FEEDS).forEach(net=>{ if(!NETFEEDS[net]) NET_FEEDS[net].forEach(u=>tries.push({net, url:u})); });
+  if(!tries.length) return 0;
+  let found = 0;
+  for(let i=0;i<tries.length;i+=25){
+    const slice = tries.slice(i,i+25).filter(x=>!NETFEEDS[x.net]);
+    if(!slice.length) continue;
+    let res = [];
+    if(PROXY_URL && BATCH_OK){ try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){} }
+    else res = await Promise.all(slice.map(async x=>{
+      try{ const items = await fetchFeed(x.url); return {url:x.url, ok:true, items}; }
+      catch(e){ return {url:x.url, ok:false}; }
+    }));
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || NETFEEDS[job.net]) return;
+      const items = r.items || (r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) ? parseRss(r.body) : []);
+      if(items && items.length){ NETFEEDS[job.net] = job.url; found++; }
+    });
+    onProgress && onProgress(Object.keys(NETFEEDS).length+" of 4 networks");
+  }
+  storeSet(NETFEED_KEY, NETFEEDS); renderNetCoverage();
+  return found;
+}
+async function readNetworks(){
+  const nets = Object.keys(NETFEEDS);
+  if(!nets.length) return [];
+  let res = [];
+  if(PROXY_URL && BATCH_OK){ try{ res = await proxyBatch(nets.map(n=>NETFEEDS[n])); }catch(e){} }
+  else res = await Promise.all(nets.map(async n=>{
+    try{ return {url:NETFEEDS[n], ok:true, items:await fetchFeed(NETFEEDS[n])}; }catch(e){ return {url:NETFEEDS[n], ok:false}; }
+  }));
+  const out = [];
+  res.forEach(r=>{
+    const net = nets.find(n=>NETFEEDS[n]===r.url); if(!net) return;
+    const items = r.items || (r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) ? parseRss(r.body) : []);
+    (items||[])
+      .filter(it=>it.date && Date.now()-it.date < 12*3600e3)
+      .sort((a,b)=>b.date-a.date).slice(0,25)
+      .forEach((it,idx)=>out.push({net, title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, lead:idx===0}));
+  });
+  HEALTH.network = HEALTH.network || {ok:0,fail:0,items:0};
+  HEALTH.network.ok++; HEALTH.network.items += out.length; renderHealth();
+  return out;
+}
+/* group the same story across the networks */
+function buildNetworks(items){
+  const groups = [];
+  items.sort((a,b)=>b.ms-a.ms).forEach(it=>{
+    const tk = toks(it.title);
+    /* network headlines are short, so two strong words plus a decent overlap is enough */
+    let g = groups.find(x=>{
+      let n = 0; tk.forEach(t=>{ if(x.tk.has(t)) n++; });
+      const jac = n / Math.max(1, tk.size + x.tk.size - n);
+      return n>=3 || (n>=2 && jac>=0.3);
+    });
+    if(!g){ g = {title:it.title, url:it.url, ms:it.ms, tk:new Set(tk), nets:new Set(), leads:new Set(), items:[]}; groups.push(g); }
+    g.nets.add(it.net);
+    if(it.lead) g.leads.add(it.net);
+    g.items.push(it);
+    g.ms = Math.max(g.ms, it.ms);
+    tk.forEach(t=>g.tk.add(t));
+  });
+  groups.forEach(g=>{
+    const cas = casualties(g.title);
+    let level = 0, tag = "";
+    NAT_RULES.forEach(([re,lv,label])=>{
+      if(String(re).indexOf("__DEATH")>=0) return;
+      if(re.test(g.title) && lv>level){ level = lv; tag = label; }
+    });
+    /* what the networks themselves are doing counts for more than any rule of mine */
+    if(g.leads.size>=3) level = Math.max(level,3);
+    else if(g.leads.size===2 || g.nets.size===4) level = Math.max(level,2);
+    else if(g.nets.size>=2) level = Math.max(level,1);
+    if(cas.killed>=10) level = Math.max(level,3);
+    g.level = level; g.tag = tag; g.cas = cas;
+    g.score = Math.min(99, Math.round(level*22 + g.nets.size*7 + g.leads.size*6 + (cas.killed?Math.min(15,cas.killed):0) +
+      ((Date.now()-g.ms)/60000 <= 60 ? 12 : (Date.now()-g.ms)/60000 <= 180 ? 7 : 2)));
+  });
+  groups.sort((a,b)=>b.score-a.score || b.ms-a.ms);
+  NETSTORIES = groups;
+  NET_T = Date.now();
+  /* the National Desk bar reads off this, rather than off a search */
+  const top = groups[0];
+  natState = {checked:true, t:Date.now(), level:top?top.level:0,
+    tags: top ? [top.tag || (top.nets.size+" networks carrying")] : [],
+    heads: groups.slice(0,3).map(g=>g.title), urls: groups.slice(0,3).map(g=>g.url),
+    src:"the networks' own feeds", since:0, nets: top?[...top.nets]:[], places: top?natPlaces(top.title):[]};
+  if(top){
+    const k = normKey(top.title).slice(0,50);
+    if(!natHistory[k]) natHistory[k] = Date.now();
+    natState.since = natHistory[k];
+  }
+  renderNat();
+  return groups;
+}
+function renderNetCoverage(){
+  const box = $("netCover"); if(!box) return;
+  const n = Object.keys(NETFEEDS).length;
+  box.innerHTML = n
+    ? '<div class="ktest ok">'+n+' of 4 network feeds working: '+esc(Object.keys(NETFEEDS).join(", "))+'</div>'
+    : '<div class="ktest off">Network feeds not checked yet: ABC, CBS, NBC, Fox.</div>';
+}
+function renderNetworkView(){
+  const head = '<div class="topbar"><h2>The networks</h2><span class="sum">'+
+    (NET_T? NETSTORIES.length+" stories · pulled "+new Date(NET_T).toLocaleTimeString("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"})+" Sydney" : "not pulled yet")+
+    '</span><button class="btn" id="netPull">'+(NET_T?"Pull again":"Pull the networks")+'</button></div>';
+  const rows = NETSTORIES.slice(0,40).map(g=>{
+    const chips = ["ABC","CBS","NBC","FOX"].map(n=>{
+      const has = g.nets.has(n), lead = g.leads.has(n);
+      return '<span class="stn '+(has?n.toLowerCase():"oth")+(has?"":" dim")+(lead?" rep":"")+'"><i>'+n+'</i><span>'+(lead?"leading":has?"carrying":"not on it")+'</span></span>';
+    }).join("");
+    const verdict = g.level>=3 ? "Special report territory: this is what the networks break in for"
+      : g.level===2 ? "Would lead the network newscasts"
+      : g.level===1 ? "In the national rundown" : "One network only";
+    return '<article class="story '+heat(g.score)+'"><div class="score"><b>'+g.score+'</b><span>national<br>weight</span></div><div>'+
+      '<div class="meta"><span class="cat">'+esc(g.tag||"National")+'</span><span>'+ago((Date.now()-g.ms)/60000)+'</span>'+
+        '<span>'+g.nets.size+' of 4 networks</span>'+(g.leads.size?'<span class="fresh">leading on '+g.leads.size+'</span>':'')+'</div>'+
+      '<h3 class="hl"><a href="'+esc(g.url)+'" target="_blank" rel="noopener">'+esc(g.title)+'</a></h3>'+
+      '<div class="stations">'+chips+'</div>'+
+      '<div class="usdesk l'+(g.level>=3?3:g.level===2?2:1)+'">'+esc(verdict)+'</div>'+
+      '</div></article>';
+  }).join("");
+  $("list").innerHTML = head + '<p class="hint" id="netNote"></p>' +
+    (rows || '<div class="empty"><b>'+(Object.keys(NETFEEDS).length?"Tap Pull the networks":"No network feeds yet")+'</b>'+
+     (Object.keys(NETFEEDS).length?"ABC, CBS, NBC and Fox, read directly. How many are carrying the same story is the cut-in signal.":"Run \"Check the network feeds\" in the sidebar first.")+'</div>');
+}
+
 /* ================= NATIONAL DESK =================
    11.5's rules, read for breaking news instead of weather: when a network goes to a special
    report, its affiliates can't cut in for a local story without breaking away from the feed.
@@ -4848,6 +4995,11 @@ function natFromArticles(got, src){
 }
 async function loadNational(force){
   if(!force && natState.t && Date.now()-natState.t < 10*60e3) return natState;
+  /* the networks' own feeds decide this now; a search is only the fallback */
+  if(Object.keys(NETFEEDS).length){
+    const netItems = await readNetworks().catch(()=>[]);
+    if(netItems.length){ buildNetworks(netItems); return natState; }
+  }
   /* in direct mode the national check is a plain news search */
   const got = DIRECT_MODE
     ? [].concat(...await Promise.all([run("google",()=>pGoogle("breaking news")), run("bing",()=>pBing("breaking news United States"))]))
@@ -4983,7 +5135,7 @@ async function copyText(txt, btn){
   setTimeout(()=>{ btn.textContent = was; }, 1600);
 }
 function syncViewButtons(){
-  [["vStory","story"],["vMarket","market"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
+  [["vStory","story"],["vMarket","market"],["vNet","networks"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
 }
 
 function syncRatingChips(){
@@ -5184,6 +5336,14 @@ function init(){
     const n = await surveyWorldFeeds(msg=>{ btn.textContent = msg; });
     busy = false; btn.disabled = false; btn.textContent = "Find a feed for every country";
     progress(1,1,"World survey: "+Object.keys(WORLDFEED).length+" of "+Object.keys(WORLD_OUTLETS).length+" countries have their own feed ("+n+" new). Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
+  });
+  $("netSurvey").addEventListener("click",async()=>{
+    if(busy) return;
+    const btn = $("netSurvey");
+    busy = true; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    await surveyNetworks(msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Check the network feeds";
+    progress(1,1, Object.keys(NETFEEDS).length+" of 4 network feeds working.");
   });
   $("wireSurvey").addEventListener("click",async()=>{
     if(busy || !PROXY_URL) return;
@@ -5443,6 +5603,7 @@ function init(){
   $("vMarket").addEventListener("click",()=>{VIEW="market";syncViewButtons();render();});
   $("vPorter").addEventListener("click",()=>{VIEW="porter";syncViewButtons();render();});
   $("vWorld").addEventListener("click",()=>{ VIEW="world"; syncViewButtons(); render(); });
+  $("vNet").addEventListener("click",()=>{ VIEW="networks"; syncViewButtons(); render(); });
   $("copyRun").addEventListener("click",e=>copyText(VIEW==="porter"?porterText():rundownText(), e.currentTarget));
   $("slotsNow").addEventListener("click",()=>{
     SLOT_ON.clear();
@@ -5472,6 +5633,13 @@ function init(){
     if(wf){ const k = wf.dataset.wflag; WFLAGS[k] = !WFLAGS[k]; worldFiltersSave(); renderWorld(); return; }
     const fo = e.target.closest("[data-follow]");
     if(fo){ const iso = fo.dataset.follow; FOLLOW.has(iso) ? FOLLOW.delete(iso) : FOLLOW.add(iso); worldFiltersSave(); renderWorld(); return; }
+    if(e.target.id==="netPull"){
+      const b = e.target; b.disabled = true; b.textContent = "Pulling…";
+      const note = $("netNote"); if(note) note.textContent = "Reading ABC, CBS, NBC and Fox…";
+      readNetworks().then(items=>{ buildNetworks(items); renderNetworkView(); },
+        ()=>{ b.disabled=false; b.textContent="Pull the networks"; if(note) note.textContent="That pull failed."; });
+      return;
+    }
     if(e.target.id==="worldPull"){
       if(worldBusy) return;
       const b = e.target;
@@ -5565,7 +5733,7 @@ function init(){
     Object.values(PORTER).forEach(e=>{ if(NAME_MIGRATE[e.market]) e.market = NAME_MIGRATE[e.market]; });
     refreshRegionList(); updateTargets(); build(); render();
   });
-  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad(); wiresLoad(); worldFiltersLoad();
+  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad(); wiresLoad(); worldFiltersLoad(); netFeedLoad();
   keysLoad().then(()=>{
     ["newsdata","currents","gnews","rss2json"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
     renderHealth();
