@@ -4861,6 +4861,10 @@ async function readNetworks(){
   HEALTH.network.ok++; HEALTH.network.items += out.length; renderHealth();
   return out;
 }
+/* Weather leads network websites constantly and almost never causes a break-in; the second list is
+   the slow-burn national story — hearings, rulings, economics — which leads bulletins, not cut-ins. */
+const NET_WEATHER = /\b(nor'?easter|winter storm|snow ?storm|blizzard|hurricane|tropical storm|heat wave|cold snap|atmospheric river|polar vortex|storm system|travel (chaos|disruption)|flight (delays|cancellations))\b/i;
+const NET_SLOW = /\b(hearing|testif\w+|indict\w+|arraign\w+|lawsuit|ruling|appeal|inflation|jobs report|interest rate|poll(ing|s)? (shows|finds)|campaign|primary|debate|budget|shutdown talks|approval rating)\b/i;
 /* group the same story across the networks */
 function buildNetworks(items){
   const groups = [];
@@ -4881,17 +4885,33 @@ function buildNetworks(items){
   });
   groups.forEach(g=>{
     const cas = casualties(g.title);
-    let level = 0, tag = "";
+    /* Two separate things, and the earlier version confused them:
+       consensus — how many networks are on it, which tells you it is the top national story;
+       severity  — whether it is the kind of event they interrupt programming for.
+       A break-in needs both. A nor'easter leads every network website and interrupts nothing. */
+    let severity = 1, tag = "";
     NAT_RULES.forEach(([re,lv,label])=>{
       if(String(re).indexOf("__DEATH")>=0) return;
-      if(re.test(g.title) && lv>level){ level = lv; tag = label; }
+      if(re.test(g.title) && lv>severity){ severity = lv; tag = label; }
     });
-    /* what the networks themselves are doing counts for more than any rule of mine */
-    if(g.leads.size>=3) level = Math.max(level,3);
-    else if(g.leads.size===2 || g.nets.size===4) level = Math.max(level,2);
-    else if(g.nets.size>=2) level = Math.max(level,1);
-    if(cas.killed>=10) level = Math.max(level,3);
-    g.level = level; g.tag = tag; g.cas = cas;
+    /* the death rules are matched by name elsewhere, so they need handling here too */
+    const isDeath = DEATH.test(g.title) && (DEATH_AGE.test(g.title)||ICON.test(g.title)||FAMOUS.test(g.title));
+    if(isDeath){
+      if(ICON.test(g.title) || LEGEND.test(g.title) || /\b(president|vice president|pope|king|queen|prime minister|chief justice|first lady)\b/i.test(g.title)){
+        severity = 3; tag = tag || "death of a national figure";
+      }else if(FAMOUS.test(g.title) && severity<2){ severity = 2; tag = tag || "death of a public figure"; }
+    }
+    const ruleLevel = severity;
+    if(cas.killed>=10) severity = 3;                       /* ten dead anywhere is a cut-in */
+    else if(cas.killed>=5 && severity<2) severity = 2;
+    /* routine weather is the classic false positive: big story, no cut-in, unless people are dying */
+    if(NET_WEATHER.test(g.title) && cas.killed<10) severity = Math.min(severity, 2);
+    /* the slow-burn cap only applies when nothing serious is in the headline: an assassination at a
+       campaign rally is not a campaign story */
+    if(NET_SLOW.test(g.title) && ruleLevel < 2 && !cas.killed) severity = Math.min(severity, 1);
+    const consensus = g.leads.size>=3 ? 3 : (g.leads.size===2 || g.nets.size===4) ? 2 : g.nets.size>=2 ? 1 : 0;
+    const level = Math.min(severity, consensus);
+    g.level = level; g.severity = severity; g.consensus = consensus; g.tag = tag; g.cas = cas;
     g.score = Math.min(99, Math.round(level*22 + g.nets.size*7 + g.leads.size*6 + (cas.killed?Math.min(15,cas.killed):0) +
       ((Date.now()-g.ms)/60000 <= 60 ? 12 : (Date.now()-g.ms)/60000 <= 180 ? 7 : 2)));
   });
@@ -4928,15 +4948,22 @@ function renderNetworkView(){
       const has = g.nets.has(n), lead = g.leads.has(n);
       return '<span class="stn '+(has?n.toLowerCase():"oth")+(has?"":" dim")+(lead?" rep":"")+'"><i>'+n+'</i><span>'+(lead?"leading":has?"carrying":"not on it")+'</span></span>';
     }).join("");
-    const verdict = g.level>=3 ? "Special report territory: this is what the networks break in for"
-      : g.level===2 ? "Would lead the network newscasts"
-      : g.level===1 ? "In the national rundown" : "One network only";
+    const why = g.leads.size+" of 4 leading, "+g.nets.size+" carrying";
+    const verdict = g.level>=3 ? "Special report territory: "+why+", and the kind of event they break in for"
+      : g.level===2 ? "Would lead the network newscasts ("+why+")"
+      : g.level===1 ? "In the national rundown ("+why+")"
+      : "One network only";
+    const caveat = (g.consensus>=3 && g.severity<3)
+      ? (NET_WEATHER.test(g.title) ? "Leading everywhere, but weather like this doesn't interrupt programming."
+         : NET_SLOW.test(g.title) ? "Leading everywhere, but this is a bulletin story rather than a cut-in."
+         : "Leading everywhere, but not the kind of event they break in for.")
+      : "";
     return '<article class="story '+heat(g.score)+'"><div class="score"><b>'+g.score+'</b><span>national<br>weight</span></div><div>'+
       '<div class="meta"><span class="cat">'+esc(g.tag||"National")+'</span><span>'+ago((Date.now()-g.ms)/60000)+'</span>'+
         '<span>'+g.nets.size+' of 4 networks</span>'+(g.leads.size?'<span class="fresh">leading on '+g.leads.size+'</span>':'')+'</div>'+
       '<h3 class="hl"><a href="'+esc(g.url)+'" target="_blank" rel="noopener">'+esc(g.title)+'</a></h3>'+
       '<div class="stations">'+chips+'</div>'+
-      '<div class="usdesk l'+(g.level>=3?3:g.level===2?2:1)+'">'+esc(verdict)+'</div>'+
+      '<div class="usdesk l'+(g.level>=3?3:g.level===2?2:1)+'">'+esc(verdict)+(caveat?'<div class="dimtxt">'+esc(caveat)+'</div>':'')+'</div>'+
       '</div></article>';
   }).join("");
   $("list").innerHTML = head + '<p class="hint" id="netNote"></p>' +
