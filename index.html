@@ -116,6 +116,9 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .wcats{margin:6px 0}
 .worldbar2{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}
 .worldbar2 .search{max-width:330px}
+.pickup{margin-top:6px;font-size:13px}
+.pickup summary{cursor:pointer;color:var(--amber)}
+.pickup.none{color:var(--dim)}
 .usdesk{margin-top:6px;font-size:13px;padding:4px 9px;border-left:3px solid var(--dim);background:var(--row2)}
 .usdesk.l3{border-left-color:var(--tally);color:#ffb3ae}
 .usdesk.l2{border-left-color:var(--amber)}
@@ -349,6 +352,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <div id="passReport"></div>
     <button class="btn wide" id="worldSurvey">Find a feed for every country</button>
     <button class="btn wide" id="worldAfrica">Fill African gaps with AllAfrica</button>
+    <button class="btn wide" id="auSurvey">Check the Australian feeds</button>
+    <div id="auCover"></div>
     <button class="btn wide" id="netSurvey">Check the network feeds</button>
     <div id="netCover"></div>
     <button class="btn wide" id="wireSurvey">Check the wires and regional feeds</button>
@@ -376,6 +381,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <button id="vStory" aria-pressed="true">By story</button>
       <button id="vMarket" aria-pressed="false">By market</button>
       <button id="vNet" aria-pressed="false">Networks</button>
+      <button id="vAU" aria-pressed="false">Australia</button>
       <button id="vWorld" aria-pressed="false">World</button>
       <button id="vPorter" aria-pressed="false">Porter log</button>
     </div>
@@ -1614,7 +1620,9 @@ const DMAS = DMA_RAW.map((r,i)=>{
 const NAME_MIGRATE = {"San Francisco-Oakland-San Jose": "San Francisco-Oak-San Jose", "Orlando-Daytona Beach-Melbourne": "Orlando-Daytona-Melbourne", "Harrisburg-Lancaster-Lebanon-York": "Harrisburg-Lancaster-York", "Grand Rapids-Kalamazoo-Battle Creek": "Grand Rapids-Kalamazoo", "Greensboro-High Point-Winston Salem": "Greensboro-Winston-Salem", "Wilkes-Barre-Scranton-Hazleton": "Wilkes-Barre-Scranton", "Charleston-Huntington": "Charleston-Huntington, WV", "Wichita-Hutchinson Plus": "Wichita-Hutchinson", "Huntsville-Decatur-Florence": "Huntsville-Decatur", "Harlingen-Weslaco-Brownsville-McAllen": "Harlingen-Weslaco-McAllen", "Champaign & Springfield-Decatur": "Champaign-Springfield-Decatur", "Cedar Rapids-Waterloo-Iowa City-Dubuque": "Cedar Rapids-Waterloo-Dubuque", "El Paso-Las Cruces": "El Paso", "Lincoln & Hastings-Kearney": "Lincoln-Hastings-Kearney", "Yakima-Pasco-Richland-Kennewick": "Yakima-Pasco-Richland", "Wichita Falls-Lawton": "WICHITA FALLS-LAWTON", "Columbus-Tupelo-West Point-Houston": "Columbus-Tupelo-West Point", "Ft. Smith-Fayetteville-Springdale-Rogers": "Ft. Smith-Fayetteville", "Santa Barbara-Santa Maria-San Luis Obispo": "Santa Barbara-San Luis Obispo"};
 
 /* stations in one market under the same owner: often a shared operation, always worth knowing */
+const NET_OF = {};       /* call sign -> its network, so affiliate pickup can show loyalty */
 DMAS.forEach(d=>{
+  d.all.forEach(st=>{ const n = (st.net||"").toUpperCase(); if(/^(ABC|CBS|NBC|FOX)$/.test(n)) NET_OF[baseCall(st.call)] = n; });
   const by = {};
   d.all.forEach(s=>{ if(s.owner) (by[s.owner]=by[s.owner]||[]).push(s.call); });
   d.shared = Object.entries(by).filter(([o,c])=>c.length>1).map(([o,c])=>c.join(" & ")+" share an owner ("+o+")");
@@ -1802,13 +1810,13 @@ function isNational(name){ const n=(name||"").trim(); return NATIONAL_NAME.test(
 /* ================= CLASSIFIER =================
    Same two-stage idea as 11.5: category match, urgency where the category needs it, blocklist first. */
 const URG = /\b(breaking|developing|live|just in|update[ds]?|underway|ongoing|active|now|currently|responding|on scene|crews|police say|officials say|deputies say|tonight|this morning|this afternoon|this evening|early today|minutes ago|closed|shut down|evacuat\w*|reported|investigat\w*)\b/i;
-const BLOCK_HARD = /\b(sentenc\w*|pleads?|pleaded|plea deal|trial|verdict|jury|arraign\w*|indict\w*|anniversary|years? ago|recap|podcast|opinion|editorial|column|obituar\w*|remember\w*|honou?r\w*|memorial|vigil|fundraiser|lawsuit|settlement|sues|sued|preview|review|recipe|sale|deals?|how to|tips|explainer|what to know|faq|ribbon|grand opening|awarded|scholarship|drill|mock|simulation|awareness|prevention month|budget|council votes?|board votes?|election|candidate|poll)\b/i;
+const BLOCK_HARD = /\b(charged (after|over|following|with)|sentenc\w*|pleads?|pleaded|plea deal|trial|verdict|jury|arraign\w*|indict\w*|anniversary|years? ago|recap|podcast|opinion|editorial|column|obituar\w*|remember\w*|honou?r\w*|memorial|vigil|fundraiser|lawsuit|settlement|sues|sued|preview|review|recipe|sale|deals?|how to|tips|explainer|what to know|faq|ribbon|grand opening|awarded|scholarship|drill|mock|simulation|awareness|prevention month|budget|council votes?|board votes?|election|candidate|poll)\b/i;
 /* soft block: sports and events, lifted when people are killed or the story is in a major category */
 const BLOCK_SOFT = /\b(season|playoffs?|touchdown|quarterback|coach|basketball|football|baseball|softball|volleyball|soccer|scoreboard|parade|festival|concert|training exercise)\b/i;
 const RULES = [
  {id:"mass", label:"Mass casualty", pts:34, major:true, re:/\b(mass shooting|mass casualty|multiple (people )?(killed|dead|shot|injured|hurt)|several (people )?(killed|dead|shot)|death toll)\b/i},
  {id:"aircraft", label:"Aircraft crash", pts:31, major:true, re:/\b((helicopter|plane|aircraft|chopper|jet|air ambulance)s? (crash\w*|went down|goes down|down)|(helicopter|plane|aircraft) crash|small plane|midair collision|mid-air collision)\b/i},
- {id:"manhunt", label:"Manhunt / standoff", pts:32, major:true, re:/\b(manhunt|standoff|barricaded|swat (team|standoff|situation|called)|shelter[- ]in[- ]place|armed and dangerous|active shooter|hostage)\b/i},
+ {id:"manhunt", label:"Manhunt / standoff", pts:32, major:true, re:/\b(siege|manhunt|standoff|barricaded|swat (team|standoff|situation|called)|shelter[- ]in[- ]place|armed and dangerous|active shooter|hostage)\b/i},
 
  {id:"responder", label:"First responder down", pts:33, major:true, re:/\b((officer|deputy|trooper|firefighter|paramedic|medic|dispatcher|chief) (shot|killed|struck|hit|injured|hurt|down|in critical|ambushed)|line[- ]of[- ]duty|(officer|firefighter|deputy) (dies|died|killed) (in|while|after)|fallen (officer|firefighter)|procession for)\b/i},
  {id:"immigration", label:"Immigration enforcement", pts:28, re:/\b(ice (raid|agents|operation|detains|arrests|checkpoint)|immigration (raid|agents|enforcement|checkpoint|sweep)|border patrol (checkpoint|agents|operation)|detained by ice|workplace raid|deportation (flight|raid)|federal agents detain)\b/i},
@@ -1829,7 +1837,7 @@ const RULES = [
  {id:"animal", label:"Animal / livestock", pts:12, urg:true, re:/\b(loose (cattle|cows|horses|bull|livestock)|cattle on the (road|highway)|animal rescue|dog attack|bear (spotted|sighting|in a)|mountain lion|alligator|snake)\b/i},
  {id:"lockdown", label:"Lockdown / threat", pts:24, re:/\b(lockdown|locked down|lock[- ]out|bomb threat|school threat|threat (at|to) \w+ (school|high|middle)|suspicious (package|device|item)|evacuated)\b/i},
  {id:"missing", label:"Missing person", pts:23, re:/\b(amber alert|silver alert|endangered (missing|runaway)|missing (child|children|teen|toddler|girl|boy|woman|man|person|hiker|swimmer|kayaker|boater|hunter|elderly)|have you seen)\b/i},
- {id:"crash", label:"Serious crash", pts:22, re:/\b((fatal|deadly|serious|major|multi[- ]vehicle) (crash|wreck|collision|accident)|pedestrian (struck|hit|killed)|hit[- ]and[- ]run|head[- ]on|rollover|pileup|killed in (a )?(crash|wreck))\b/i},
+ {id:"crash", label:"Serious crash", pts:22, re:/\b((?:dead|died|dies) in (?:a |the )?(?:crash|collision|smash|rollover)|single[- ]vehicle smash|(fatal|deadly|serious|major|multi[- ]vehicle) (crash|wreck|collision|accident|smash)|pedestrian (struck|hit|killed)|hit[- ]and[- ]run|head[- ]on|rollover|pileup|killed in (a )?(crash|wreck))\b/i},
  {id:"rescue", label:"Water / rescue", pts:21, re:/\b(drown\w*|body (found|recovered|pulled)|dive team|water rescue|high[- ]water rescue|swift[- ]water|rescued|search and rescue|trapped)\b/i},
  {id:"fire", label:"Fire", pts:20, re:/\b(structure fire|house fire|home fire|apartment fire|mobile home fire|business fire|commercial fire|warehouse fire|brush fire|grass fire|wildfire|blaze|fire (destroys|guts|damages|crews|breaks out|burns)|firefighters (battle|respond|responded|called))\b/i},
  {id:"flood", label:"Flooding / storm", pts:20, re:/\b(flood(ing|ed|waters)? (closes?|closed|homes|rescue|reported|forces|strand\w*|swamp\w*)|flash flood(ing)?|homes flooded|storm damage|tornado (damage|touch\w*|confirmed|hits?)|downed (trees|power lines)|damaging winds)\b/i},
@@ -4112,7 +4120,8 @@ function render(){
                     'The relays answered earlier, so they are probably rate-limiting you. Wait a minute and sweep again.')+'</div>'
     : "";
 
-  if(VIEW==="networks"){ renderNetworkView(); }
+  if(VIEW==="au"){ renderAU(); }
+  else if(VIEW==="networks"){ renderNetworkView(); }
   else if(VIEW==="world"){ renderWorld(); }
   else if(VIEW==="porter"){ renderPorter(); }
   else if(!lastRun){ /* keep the welcome block */ }
@@ -4141,7 +4150,7 @@ function render(){
   }
   renderFilters();
   renderBoring();
-  $("unplacedBox").hidden = !unplaced.length || VIEW==="porter" || VIEW==="world";
+  $("unplacedBox").hidden = !unplaced.length || VIEW==="porter" || VIEW==="world" || VIEW==="networks" || VIEW==="au";
   $("unplacedSum").textContent = unplaced.length+" stor"+(unplaced.length===1?"y":"ies")+" couldn't be placed in a market";
   $("unplaced").innerHTML = unplaced.slice(0,60).map(storyRow).join("");
 }
@@ -4801,6 +4810,149 @@ function renderWorld(){
   $("list").innerHTML = head + chips + '<p class="hint" id="worldNote"></p>' + (rows || '<div class="empty"><b>'+(WORLD_T?"Nothing above that rating":(Object.keys(WORLDFEED).length?"Tap Pull world desk to start":"No country feeds yet"))+'</b>'+(Object.keys(WORLDFEED).length?"Read straight from "+Object.keys(WORLDFEED).length+" countries' own newsrooms. Nothing is fetched until you ask.":"Run \"Find a feed for every country\" in the sidebar first — the world desk reads each country's own newsroom, nothing else.")+'</div>');
 }
 
+/* ================= AUSTRALIAN DESK =================
+   The local board applied at home: national and state newsrooms, the Sydney and Melbourne papers,
+   and the RFS major incidents feed, placed by state and town. Same breaking test as the US board. */
+const AU_FEEDS = [["ABC News","https://www.abc.net.au/news/feed/51120/rss.xml"],["ABC Just In","https://www.abc.net.au/news/feed/45910/rss.xml"],["SBS News","https://www.sbs.com.au/news/feed"],["news.com.au","https://www.news.com.au/content-feeds/latest-news-national/"],["Sydney Morning Herald","https://www.smh.com.au/rss/feed.xml"],["The Age","https://www.theage.com.au/rss/feed.xml"],["Brisbane Times","https://www.brisbanetimes.com.au/rss/feed.xml"],["WAtoday","https://www.watoday.com.au/rss/feed.xml"],["Guardian Australia","https://www.theguardian.com/australia-news/rss"],["9News","https://www.9news.com.au/rss"],["7NEWS","https://7news.com.au/feed"],["NSW RFS incidents","https://www.rfs.nsw.gov.au/feeds/majorIncidents.xml"],["Daily Telegraph","https://www.dailytelegraph.com.au/content-feeds/latest-news-national/"],
+["Sky News Australia","https://www.skynews.com.au/feed"],
+["The Advertiser","https://www.adelaidenow.com.au/content-feeds/latest-news-national/"],
+["NT News","https://www.ntnews.com.au/content-feeds/latest-news-national/"],
+["The Mercury","https://www.themercury.com.au/content-feeds/latest-news-national/"],
+["Canberra Times","https://www.canberratimes.com.au/rss.xml"],
+["The Australian","https://www.theaustralian.com.au/feed/"],
+["AFR","https://www.afr.com/rss/feed.xml"]];
+const AU_PLACES = {"NSW":["Sydney","Newcastle","Wollongong","Central Coast","Gosford","Parramatta","Penrith","Liverpool","Blacktown","Bankstown","Campbelltown","Bondi","Manly","Dee Why","Brookvale","Narrabeen","Collaroy","Mona Vale","Avalon","Chatswood","Hornsby","Ryde","Northern Beaches","Blue Mountains","Katoomba","Wagga Wagga","Dubbo","Tamworth","Albury","Orange NSW","Bathurst","Coffs Harbour","Port Macquarie","Byron Bay","Lismore","Broken Hill","Goulburn","Nowra","Bega","Cessnock","Maitland","Hunter Valley","Illawarra","Riverina"],"VIC":["Melbourne","Geelong","Ballarat","Bendigo","Shepparton","Mildura","Warrnambool","Traralgon","Frankston","Dandenong","Werribee","Sunbury","Gippsland","Mornington Peninsula","Yarra Valley","Box Hill","St Kilda"],"QLD":["Brisbane","Gold Coast","Sunshine Coast","Townsville","Cairns","Toowoomba","Rockhampton","Mackay","Bundaberg","Gladstone","Hervey Bay","Ipswich","Logan","Caboolture","Mount Isa","Far North Queensland"],"WA":["Perth","Fremantle","Bunbury","Geraldton","Kalgoorlie","Broome","Albany WA","Mandurah","Joondalup","Pilbara","Karratha","Port Hedland"],"SA":["Adelaide","Mount Gambier","Whyalla","Port Augusta","Port Lincoln","Murray Bridge","Gawler","Barossa"],"TAS":["Hobart","Launceston","Devonport","Burnie","Kingston Tas"],"ACT":["Canberra","Belconnen","Tuggeranong","Gungahlin"],"NT":["Darwin","Alice Springs","Katherine","Palmerston","Tennant Creek"]};
+const AU_STATE_NAME = {NSW:"New South Wales",VIC:"Victoria",QLD:"Queensland",WA:"Western Australia",SA:"South Australia",TAS:"Tasmania",ACT:"ACT",NT:"Northern Territory"};
+const AU_GAZ = [];
+Object.keys(AU_PLACES).forEach(st=>{
+  AU_PLACES[st].concat([AU_STATE_NAME[st], st]).forEach(n=>{
+    if(!n) return;
+    AU_GAZ.push({st, name:n, len:n.length, re:new RegExp("(^|[^A-Za-z])"+reEsc(n)+"(?![A-Za-z])", n.length<=3 ? "" : "i")});
+  });
+});
+AU_GAZ.sort((a,b)=>b.len-a.len);
+function placeAU(text){
+  let masked = " "+text+" ";
+  const hits = [], towns = [];
+  for(const g of AU_GAZ){
+    const m = masked.match(g.re);
+    if(!m) continue;
+    hits.push(g.st);
+    if(g.name!==g.st && g.name!==AU_STATE_NAME[g.st]) towns.push(g.name);
+    const start = m.index + m[1].length;
+    masked = masked.slice(0,start) + " ".repeat(g.name.length) + masked.slice(start+g.name.length);
+  }
+  return {states:[...new Set(hits)], towns:[...new Set(towns)].slice(0,3)};
+}
+const AUFEED_KEY = "ds-hyperlocal-aufeeds";
+let AUFEEDS = {};        /* outlet -> url that worked */
+let AUSTORIES = [], AU_T = 0;
+function auFeedLoad(){ return storeGet(AUFEED_KEY,{}).then(v=>{ AUFEEDS = v||{}; renderAUCoverage(); }); }
+async function surveyAU(onProgress){
+  const tries = AU_FEEDS.filter(([n])=>!AUFEEDS[n]).map(([n,u])=>({name:n, url:u}));
+  AU_FEEDS.forEach(([n,u])=>{ if(!AUFEEDS[n]) tries.push({name:n, url:"https://"+hostOf(u)+"/", home:true}); });
+  if(!tries.length) return 0;
+  let found = 0;
+  for(let i=0;i<tries.length;i+=25){
+    const slice = tries.slice(i,i+25).filter(x=>!AUFEEDS[x.name]);
+    if(!slice.length) continue;
+    let res = [];
+    if(PROXY_URL && BATCH_OK){ try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){} }
+    else res = await Promise.all(slice.map(async x=>{
+      try{ return {url:x.url, ok:true, items:await fetchFeed(x.url)}; }catch(e){ return {url:x.url, ok:false}; }
+    }));
+    const extra = [];
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || AUFEEDS[job.name]) return;
+      if(job.home && r.body){ feedLinksIn(r.body, job.url).slice(0,2).forEach(u=>extra.push({name:job.name, url:u})); return; }
+      const items = r.items || (r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) ? parseRss(r.body) : []);
+      if(items && items.length){ AUFEEDS[job.name] = job.url; found++; }
+    });
+    if(extra.length){
+      let res2 = []; try{ res2 = await proxyBatch(extra.map(x=>x.url)); }catch(e){}
+      res2.forEach(r=>{
+        const job = extra.find(x=>x.url===r.url); if(!job || AUFEEDS[job.name] || !r.body) return;
+        if(parseRss(r.body).length){ AUFEEDS[job.name] = r.url; found++; }
+      });
+    }
+    onProgress && onProgress(Object.keys(AUFEEDS).length+" of "+AU_FEEDS.length+" feeds");
+  }
+  storeSet(AUFEED_KEY, AUFEEDS); renderAUCoverage();
+  return found;
+}
+async function loadAU(){
+  const names = Object.keys(AUFEEDS);
+  if(!names.length) return [];
+  let res = [];
+  if(PROXY_URL && BATCH_OK){ try{ res = await proxyBatch(names.map(n=>AUFEEDS[n])); }catch(e){} }
+  else res = await Promise.all(names.map(async n=>{
+    try{ return {url:AUFEEDS[n], ok:true, items:await fetchFeed(AUFEEDS[n])}; }catch(e){ return {url:AUFEEDS[n], ok:false}; }
+  }));
+  const raw = [];
+  res.forEach(r=>{
+    const name = names.find(n=>AUFEEDS[n]===r.url); if(!name) return;
+    const items = r.items || (r.ok && r.body && /<(rss|feed|item)[\s>]/i.test(r.body) ? parseRss(r.body) : []);
+    (items||[]).filter(it=>it.date && Date.now()-it.date < 12*3600e3)
+      .sort((a,b)=>b.date-a.date).slice(0,30)
+      .forEach(it=>raw.push({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:name, desc:it.desc||""}));
+  });
+  /* one entry per story, however many outlets have it */
+  const byKey = new Map();
+  raw.forEach(a=>{
+    const k = normKey(a.title); if(!k) return;
+    let s = byKey.get(k);
+    if(!s){ s = {title:a.title, url:a.url, ms:a.ms, sources:new Set(), texts:new Set()}; byKey.set(k,s); }
+    s.ms = Math.max(s.ms, a.ms); s.sources.add(a.source); s.texts.add(a.title+" "+(a.desc||""));
+  });
+  const out = [];
+  byKey.forEach(s=>{
+    const text = [...s.texts].join(" ");
+    const cls = classify(text);
+    if(!cls) return;
+    const place = placeAU(text);
+    const cas = casualties(text);
+    const ageMin = (Date.now()-s.ms)/60000;
+    let score = cls.rule.pts*1.6;
+    score += ageMin<=30 ? 20 : ageMin<=60 ? 15 : ageMin<=180 ? 9 : 3;
+    score += Math.min(15, (s.sources.size-1)*5);
+    score += cas.killed>=3 ? 12 : cas.killed>=1 ? 6 : 0;
+    if(cls.urgent) score += 5;
+    out.push({s, cls, place, cas, ageMin, score:Math.max(1,Math.min(99,Math.round(score)))});
+  });
+  out.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
+  AUSTORIES = out; AU_T = Date.now();
+  return out;
+}
+function renderAUCoverage(){
+  const box = $("auCover"); if(!box) return;
+  const n = Object.keys(AUFEEDS).length;
+  box.innerHTML = n ? '<div class="ktest ok">'+n+' of '+AU_FEEDS.length+' Australian feeds working: '+esc(Object.keys(AUFEEDS).join(", "))+'</div>'
+                    : '<div class="ktest off">Australian feeds not checked yet: ABC, SBS, news.com.au, the Nine papers, Guardian Australia, 9News, 7NEWS, the Daily Telegraph and RFS incidents.</div>';
+}
+function renderAU(){
+  const stateSel = ($("auState")||{value:"all"}).value || "all";
+  const list = AUSTORIES.filter(x=> stateSel==="all" || x.place.states.includes(stateSel));
+  const head = '<div class="topbar"><h2>Australia</h2><span class="sum">'+
+    (AU_T ? list.length+" stories · pulled "+new Date(AU_T).toLocaleTimeString("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"}) : "not pulled yet")+
+    '</span><button class="btn" id="auPull">'+(AU_T?"Pull again":"Pull Australia")+'</button></div>'+
+    '<div class="worldbar"><select id="auState"><option value="all">Everywhere</option>'+
+      Object.keys(AU_STATE_NAME).map(s=>'<option value="'+s+'"'+(stateSel===s?" selected":"")+'>'+AU_STATE_NAME[s]+'</option>').join("")+'</select></div>';
+  const rows = list.slice(0,80).map(x=>{
+    const where = x.place.towns.length ? x.place.towns.join(", ")+(x.place.states.length?" · "+x.place.states.join(", "):"")
+                : x.place.states.length ? x.place.states.map(s=>AU_STATE_NAME[s]).join(", ") : "";
+    return '<article class="story '+heat(x.score)+'"><div class="score"><b>'+x.score+'</b><span>must<br>watch</span></div><div>'+
+      '<div class="meta"><span class="cat">'+esc(x.cls.rule.label)+'</span><span>'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+
+        (x.cas.killed?'<span class="fresh">'+x.cas.killed+' killed</span>':'')+'</div>'+
+      '<h3 class="hl"><a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
+      '<div class="src">'+esc([...x.s.sources].slice(0,4).join(", "))+'</div>'+
+      (where?'<div class="mkt"><span class="name">'+esc(where)+'</span><span class="lt">'+esc(new Intl.DateTimeFormat("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"}).format(new Date(window.DS_TESTNOW||Date.now())))+' Sydney</span></div>':'')+
+      '</div></article>';
+  }).join("");
+  $("list").innerHTML = head + '<p class="hint" id="auNote"></p>' +
+    (rows || '<div class="empty"><b>'+(Object.keys(AUFEEDS).length?"Tap Pull Australia":"No Australian feeds yet")+'</b>'+
+      (Object.keys(AUFEEDS).length?"National and state newsrooms, the papers and RFS incidents, on the same breaking test as the US board.":"Run \"Check the Australian feeds\" in the sidebar first.")+'</div>');
+}
+
 /* ================= THE NETWORKS =================
    The four networks' own feeds, read directly. How many of them are carrying the same story is a
    far better cut-in signal than guessing from a search: one network is a story, all four is a
@@ -4814,6 +4966,7 @@ const NET_FEEDS = {
 const NETFEED_KEY = "ds-hyperlocal-netfeeds";
 let NETFEEDS = {};       /* ABC -> url that worked */
 let NETSTORIES = [];     /* what the networks are carrying */
+
 let NET_T = 0;
 function netFeedLoad(){ return storeGet(NETFEED_KEY,{}).then(v=>{ NETFEEDS = v||{}; renderNetCoverage(); }); }
 async function surveyNetworks(onProgress){
@@ -4939,6 +5092,47 @@ function renderNetCoverage(){
     ? '<div class="ktest ok">'+n+' of 4 network feeds working: '+esc(Object.keys(NETFEEDS).join(", "))+'</div>'
     : '<div class="ktest off">Network feeds not checked yet: ABC, CBS, NBC, Fox.</div>';
 }
+/* Which local newsrooms picked the national story up, and how long they took. Matched against the
+   raw articles from station feeds rather than the classified board, because wire copy often doesn't
+   read as breaking on its own. */
+function localPickup(g){
+  const netFirst = Math.min(...g.items.map(i=>i.ms));
+  const seen = new Map();          /* call -> {ms, dma} */
+  ARTS.forEach(a=>{
+    if(a.prov!=="station" || !a.ms || !a.source) return;
+    let n = 0; const tk = toks(a.title);
+    tk.forEach(t=>{ if(g.tk.has(t)) n++; });
+    const jac = n / Math.max(1, tk.size + g.tk.size - n);
+    if(!(n>=3 || (n>=2 && jac>=0.3))) return;
+    const call = baseCall(a.source);
+    const prev = seen.get(call);
+    if(!prev || a.ms < prev.ms) seen.set(call, {ms:a.ms, dma:(a.scanDmas&&a.scanDmas[0])!=null ? a.scanDmas[0] : CALL[call]});
+  });
+  const rows = [...seen.entries()].map(([call,v])=>({call, mins:Math.round((v.ms-netFirst)/60000), dma:v.dma}))
+    .sort((a,b)=>a.mins-b.mins);
+  return {netFirst, rows};
+}
+/* Which affiliates picked up a network story, and how long they took. Uses whatever the last local
+   sweep read, so it only means something after a sweep. Station feeds carry publish times, so the
+   lag is real rather than estimated. */
+function localPickup(g){
+  const out = [];
+  ARTS.forEach(a=>{
+    if(a.prov!=="station" || !a.ms || !a.source) return;
+    const call = baseCall(a.source);
+    if(CALL[call]==null) return;
+    let n = 0; const tk = toks(a.title);
+    tk.forEach(t=>{ if(g.tk.has(t)) n++; });
+    const jac = n / Math.max(1, tk.size + g.tk.size - n);
+    if(!(n>=3 || (n>=2 && jac>=0.3))) return;
+    const lag = Math.round((a.ms - g.ms)/60000);
+    const prev = out.find(x=>x.call===call);
+    if(prev){ if(lag < prev.lag) prev.lag = lag; return; }
+    out.push({call, dma:CALL[call], lag, net:NET_OF[call]||"", title:a.title, url:a.url});
+  });
+  out.sort((a,b)=>a.lag-b.lag);
+  return out;
+}
 function renderNetworkView(){
   const head = '<div class="topbar"><h2>The networks</h2><span class="sum">'+
     (NET_T? NETSTORIES.length+" stories · pulled "+new Date(NET_T).toLocaleTimeString("en-AU",{timeZone:"Australia/Sydney",hour:"numeric",minute:"2-digit"})+" Sydney" : "not pulled yet")+
@@ -4964,6 +5158,18 @@ function renderNetworkView(){
       '<h3 class="hl"><a href="'+esc(g.url)+'" target="_blank" rel="noopener">'+esc(g.title)+'</a></h3>'+
       '<div class="stations">'+chips+'</div>'+
       '<div class="usdesk l'+(g.level>=3?3:g.level===2?2:1)+'">'+esc(verdict)+(caveat?'<div class="dimtxt">'+esc(caveat)+'</div>':'')+'</div>'+
+      (()=>{
+        const pick = localPickup(g);
+        if(!STORIES.length && !ARTS.length) return '<div class="dimtxt">Run a local sweep to see which affiliates picked this up.</div>';
+        if(!pick.length) return '<div class="dimtxt">No affiliate in your last sweep has posted this.</div>';
+        const own = pick.filter(x=>x.net && g.nets.has(x.net)).length;
+        return '<details class="sides"><summary>'+pick.length+' affiliate'+(pick.length===1?"":"s")+' picked this up'+
+          (own?' · '+own+' on their own network\'s story':'')+' · fastest '+esc(pick[0].call)+' '+(pick[0].lag<=0?"ahead of the network":"+"+pick[0].lag+" min")+'</summary>'+
+          pick.slice(0,12).map(x=>'<div class="side"><span class="sideflag">'+esc(x.call)+(x.net?' ('+esc(x.net)+')':'')+' · '+esc(DMAS[x.dma].m)+'</span>'+
+            '<a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.title)+'</a>'+
+            '<span class="dimtxt">'+(x.lag<=0?Math.abs(x.lag)+" min before the network":x.lag+" min after")+'</span></div>').join("")+
+          '</details>';
+      })()+
       '</div></article>';
   }).join("");
   $("list").innerHTML = head + '<p class="hint" id="netNote"></p>' +
@@ -5162,7 +5368,7 @@ async function copyText(txt, btn){
   setTimeout(()=>{ btn.textContent = was; }, 1600);
 }
 function syncViewButtons(){
-  [["vStory","story"],["vMarket","market"],["vNet","networks"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
+  [["vStory","story"],["vMarket","market"],["vNet","networks"],["vAU","au"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
 }
 
 function syncRatingChips(){
@@ -5363,6 +5569,14 @@ function init(){
     const n = await surveyWorldFeeds(msg=>{ btn.textContent = msg; });
     busy = false; btn.disabled = false; btn.textContent = "Find a feed for every country";
     progress(1,1,"World survey: "+Object.keys(WORLDFEED).length+" of "+Object.keys(WORLD_OUTLETS).length+" countries have their own feed ("+n+" new). Took "+Math.round((Date.now()-pullStart)/1000)+" s.");
+  });
+  $("auSurvey").addEventListener("click",async()=>{
+    if(busy) return;
+    const btn = $("auSurvey");
+    busy = true; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    await surveyAU(msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Check the Australian feeds";
+    progress(1,1, Object.keys(AUFEEDS).length+" of "+AU_FEEDS.length+" Australian feeds working.");
   });
   $("netSurvey").addEventListener("click",async()=>{
     if(busy) return;
@@ -5631,6 +5845,7 @@ function init(){
   $("vPorter").addEventListener("click",()=>{VIEW="porter";syncViewButtons();render();});
   $("vWorld").addEventListener("click",()=>{ VIEW="world"; syncViewButtons(); render(); });
   $("vNet").addEventListener("click",()=>{ VIEW="networks"; syncViewButtons(); render(); });
+  $("vAU").addEventListener("click",()=>{ VIEW="au"; syncViewButtons(); render(); });
   $("copyRun").addEventListener("click",e=>copyText(VIEW==="porter"?porterText():rundownText(), e.currentTarget));
   $("slotsNow").addEventListener("click",()=>{
     SLOT_ON.clear();
@@ -5660,6 +5875,12 @@ function init(){
     if(wf){ const k = wf.dataset.wflag; WFLAGS[k] = !WFLAGS[k]; worldFiltersSave(); renderWorld(); return; }
     const fo = e.target.closest("[data-follow]");
     if(fo){ const iso = fo.dataset.follow; FOLLOW.has(iso) ? FOLLOW.delete(iso) : FOLLOW.add(iso); worldFiltersSave(); renderWorld(); return; }
+    if(e.target.id==="auPull"){
+      const b = e.target; b.disabled = true; b.textContent = "Pulling…";
+      const note = $("auNote"); if(note) note.textContent = "Reading the Australian feeds…";
+      loadAU().then(()=>renderAU(), ()=>{ b.disabled=false; b.textContent="Pull Australia"; if(note) note.textContent="That pull failed."; });
+      return;
+    }
     if(e.target.id==="netPull"){
       const b = e.target; b.disabled = true; b.textContent = "Pulling…";
       const note = $("netNote"); if(note) note.textContent = "Reading ABC, CBS, NBC and Fox…";
@@ -5695,6 +5916,7 @@ function init(){
     if(e.target.id==="worldQ"){ WQ = e.target.value.trim(); renderWorld(); const q = $("worldQ"); if(q){ q.focus(); q.setSelectionRange(q.value.length,q.value.length); } }
   });
   document.querySelector("main").addEventListener("change",e=>{
+    if(e.target.id==="auState"){ renderAU(); return; }
     if(e.target.id==="worldCont"){ renderWorld(); return; }
     if(e.target.id==="worldSort"){ WSORT = e.target.value; worldFiltersSave(); renderWorld(); return; }
     if(e.target.id==="worldWin"){
@@ -5760,7 +5982,7 @@ function init(){
     Object.values(PORTER).forEach(e=>{ if(NAME_MIGRATE[e.market]) e.market = NAME_MIGRATE[e.market]; });
     refreshRegionList(); updateTargets(); build(); render();
   });
-  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad(); wiresLoad(); worldFiltersLoad(); netFeedLoad();
+  keyUseLoad(); feedPathLoad(); feedMapLoad(); worldFeedLoad(); wiresLoad(); worldFiltersLoad(); netFeedLoad(); auFeedLoad();
   keysLoad().then(()=>{
     ["newsdata","currents","gnews","rss2json"].forEach(k=>{ if(NEWS_KEYS[k]) $("k_"+k).value = NEWS_KEYS[k]; });
     renderHealth();
