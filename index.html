@@ -382,6 +382,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <button id="vMarket" aria-pressed="false">By market</button>
       <button id="vNet" aria-pressed="false">Networks</button>
       <button id="vAU" aria-pressed="false">Australia</button>
+      <button id="vSport" aria-pressed="false">Sports</button>
       <button id="vWorld" aria-pressed="false">World</button>
       <button id="vPorter" aria-pressed="false">Porter log</button>
     </div>
@@ -1888,6 +1889,68 @@ function classifyBoring(text){
 let BORING_LIST = [];
 let SHOW_BORING = true;
 const BORING_ON = new Set(BORING.map(r=>r.id));
+/* ================= SPORTS DESK =================
+   Sport is blocked on the breaking board and dumped on the boring desk, which makes it invisible.
+   This collects it from every feed the page reads — stations, papers, the Australian outlets, the
+   networks and the world desk — and rates it as a sports desk would. */
+const SPORT_RULES = [
+ {id:"death", label:"Death or serious injury", pts:34, re:/\b(dies|died|death of|killed|collapse[sd]?|cardiac|critical condition|life[- ]threatening|paralys\w+|stretchered)\b/i},
+ {id:"title", label:"Title or championship", pts:30, re:/\b(wins? the (title|championship|premiership|grand final|super bowl|world series|stanley cup|nba finals|world cup)|champions?|title game|grand final|state championship|national championship|gold medal)\b/i},
+ {id:"scandal", label:"Scandal or investigation", pts:28, re:/\b(doping|banned substance|disqualif\w+|positive swab|stood down|rubbed out|stewards? (inquiry|report)|match[- ]fixing|betting (scandal|probe|investigation)|charged|arrested|suspended (for|over)|investigation into|misconduct|hazing|assault charge)\b/i},
+ {id:"coach", label:"Coach or manager move", pts:24, re:/\b(fired|sacked|steps? down|resigns?|named (head )?coach|hires?|appointed|interim coach|out as coach|parts ways)\b/i},
+ {id:"move", label:"Signing or trade", pts:22, re:/\b(signs?|signing|traded?|trade deadline|free agen\w+|transfer|drafted?|contract extension|released by|waived|recruited)\b/i},
+ {id:"injury", label:"Injury", pts:20, re:/\b(injur\w+|out for the season|torn|acl|hamstring|concussion|surgery|ruled out|sidelined)\b/i},
+ {id:"playoff", label:"Finals or playoffs", pts:19, re:/\b(playoffs?|finals?|semi[- ]?final|quarter[- ]?final|elimination|bi[- ]district|regional final|postseason|qualif\w+ for)\b/i},
+ {id:"result", label:"Result", pts:14, re:/\b(beat|defeat\w*|wins?|loses?|upset|rout|shutout|comeback|overtime|extra time|final score|\d+[-–]\d+)\b/i},
+ {id:"venue", label:"Venue or crowd", pts:23, re:/\b(stadium|arena|crowd (trouble|crush)|pitch invasion|evacuat\w+|roof|field conditions|ground closed|new stadium|naming rights)\b/i}
+];
+const SPORT_WORDS = /\b(football|basketball|baseball|softball|volleyball|soccer|hockey|cricket|rugby|league|nrl|afl|nfl|nba|mlb|nhl|ncaa|golf|tennis|boxing|ufc|mma|motogp|formula 1|f1|nascar|olympic\w*|athletics|swimming|netball|greyhound|horse racing|jockey|trainer|racing|marathon|coach|quarterback|striker|goalkeeper|halfback|fullback|winger|midfielder|defender|ruckman|five[- ]eighth|pitcher|batter|bowler|all[- ]rounder|sprinter|swimmer|cyclist|playoffs?|grand final|super bowl|world cup|varsity|high school|regional (final|semifinal|round)|district (title|final|champion\w*)|state (title|final|champion\w*|tournament)|bi[- ]district|class \d+a|tournament|invitational|scrimmage|season opener|derby|semi[- ]?final|quarter[- ]?final)\b/i;
+function classifySport(text){
+  if(!SPORT_WORDS.test(text)) return null;
+  const hits = SPORT_RULES.filter(r=>r.re.test(text));
+  if(!hits.length) return null;
+  hits.sort((a,b)=>b.pts-a.pts);
+  return hits[0];
+}
+let SPORTS = [];          /* every sports story the page has seen this session */
+const SPORT_SEEN = new Set();
+/* origin is which desk it came from, so you can keep Texoma and Australia apart */
+function addSport(origin, title, url, ms, source, where){
+  if(!title || !ms) return;
+  const key = normKey(title).slice(0,60);
+  if(!key || SPORT_SEEN.has(key)) return;
+  const rule = classifySport(title);
+  if(!rule) return;
+  SPORT_SEEN.add(key);
+  const ageMin = (Date.now()-ms)/60000;
+  const score = Math.max(1, Math.min(99, Math.round(rule.pts*1.7 + (ageMin<=60?16:ageMin<=180?10:ageMin<=720?5:2))));
+  SPORTS.push({origin, title, url, ms, source, where:where||"", rule, score, ageMin});
+}
+function renderSports(){
+  const scope = ($("sportScope")||{value:"all"}).value || "all";
+  const q = ($("sportQ")||{value:""}).value.trim().toLowerCase();
+  const list = SPORTS.filter(s=>{
+    if(scope!=="all" && s.origin!==scope) return false;
+    if(q && !((s.title+" "+s.source+" "+s.where).toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
+  const counts = {};
+  SPORTS.forEach(s=>{ counts[s.origin] = (counts[s.origin]||0)+1; });
+  const head = '<div class="topbar"><h2>Sports desk</h2><span class="sum">'+
+    (SPORTS.length ? list.length+" of "+SPORTS.length+" stories" : "nothing yet — run a sweep or pull another desk")+'</span></div>'+
+    '<div class="worldbar">'+
+      '<select id="sportScope">'+[["all","Everything"],["local","US local"],["au","Australia"],["world","World"],["network","Networks"]]
+        .map(o=>'<option value="'+o[0]+'"'+(scope===o[0]?" selected":"")+'>'+o[1]+(counts[o[0]]?" ("+counts[o[0]]+")":"")+'</option>').join("")+'</select>'+
+      '<input class="search" id="sportQ" type="search" placeholder="Team, sport, town or outlet" value="'+esc(q)+'">'+
+    '</div>';
+  const rows = list.slice(0,80).map(s=>
+    '<article class="story '+heat(s.score)+'"><div class="score"><b>'+s.score+'</b><span>sports<br>weight</span></div><div>'+
+    '<div class="meta"><span class="cat">'+esc(s.rule.label)+'</span><span>'+ago(s.ageMin)+'</span><span>'+esc(s.origin==="local"?"US local":s.origin==="au"?"Australia":s.origin==="world"?"World":"Network")+'</span>'+
+      (s.where?'<span>'+esc(s.where)+'</span>':'')+'</div>'+
+    '<h3 class="hl"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">'+esc(s.title)+'</a></h3>'+
+    '<div class="src">'+esc(s.source)+'</div></div></article>').join("");
+  $("list").innerHTML = head + (rows || '<div class="empty"><b>No sport yet</b>Sport is picked up from every desk as you use them: sweep the local board, or pull Australia, the world desk or the networks.</div>');
+}
 function classify(text){
   if(BLOCK_HARD.test(text)) return null;
   const hits = RULES.filter(r => r.re.test(text) && (!r.urg || URG.test(text)));
@@ -3770,6 +3833,9 @@ function build(){
     const text = [...s.texts].join(" ");
     const cls = classify(text);
     if(!cls){
+      let stDmaS = null;
+      for(const c of s.calls){ if(CALL[c]!=null){ stDmaS = CALL[c]; break; } }
+      addSport("local", s.title, s.url, s.ms, [...s.sources].slice(0,2).join(", "), stDmaS!=null?DMAS[stDmaS].m:"");
       const b = classifyBoring(text);
       if(b){
         let stDma = null, stCall = null;
@@ -4120,7 +4186,8 @@ function render(){
                     'The relays answered earlier, so they are probably rate-limiting you. Wait a minute and sweep again.')+'</div>'
     : "";
 
-  if(VIEW==="au"){ renderAU(); }
+  if(VIEW==="sport"){ renderSports(); }
+  else if(VIEW==="au"){ renderAU(); }
   else if(VIEW==="networks"){ renderNetworkView(); }
   else if(VIEW==="world"){ renderWorld(); }
   else if(VIEW==="porter"){ renderPorter(); }
@@ -4730,6 +4797,10 @@ function buildWorld(got){
     x.usDesk = usBreakIn(x);
   });
   WORLD_PULLS++;
+  got.forEach(a=>{
+    const cs = placeCountry(a.title);
+    addSport("world", a.title, a.url, a.ms, a.source, cs.length?COUNTRIES[cs[0]].n:"");
+  });
   all.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
   WORLD = all; WORLD_T = Date.now();
   return all;
@@ -4920,6 +4991,7 @@ async function loadAU(){
     out.push({s, cls, place, cas, ageMin, score:Math.max(1,Math.min(99,Math.round(score)))});
   });
   out.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
+  raw.forEach(a=>addSport("au", a.title, a.url, a.ms, a.source, (placeAU(a.title).states||[]).join(", ")));
   AUSTORIES = out; AU_T = Date.now();
   return out;
 }
@@ -5068,6 +5140,7 @@ function buildNetworks(items){
     g.score = Math.min(99, Math.round(level*22 + g.nets.size*7 + g.leads.size*6 + (cas.killed?Math.min(15,cas.killed):0) +
       ((Date.now()-g.ms)/60000 <= 60 ? 12 : (Date.now()-g.ms)/60000 <= 180 ? 7 : 2)));
   });
+  items.forEach(it=>addSport("network", it.title, it.url, it.ms, it.net, ""));
   groups.sort((a,b)=>b.score-a.score || b.ms-a.ms);
   NETSTORIES = groups;
   NET_T = Date.now();
@@ -5368,7 +5441,7 @@ async function copyText(txt, btn){
   setTimeout(()=>{ btn.textContent = was; }, 1600);
 }
 function syncViewButtons(){
-  [["vStory","story"],["vMarket","market"],["vNet","networks"],["vAU","au"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
+  [["vStory","story"],["vMarket","market"],["vNet","networks"],["vAU","au"],["vSport","sport"],["vWorld","world"],["vPorter","porter"]].forEach(([id,v])=>$(id).setAttribute("aria-pressed", VIEW===v));
 }
 
 function syncRatingChips(){
@@ -5846,6 +5919,7 @@ function init(){
   $("vWorld").addEventListener("click",()=>{ VIEW="world"; syncViewButtons(); render(); });
   $("vNet").addEventListener("click",()=>{ VIEW="networks"; syncViewButtons(); render(); });
   $("vAU").addEventListener("click",()=>{ VIEW="au"; syncViewButtons(); render(); });
+  $("vSport").addEventListener("click",()=>{ VIEW="sport"; syncViewButtons(); render(); });
   $("copyRun").addEventListener("click",e=>copyText(VIEW==="porter"?porterText():rundownText(), e.currentTarget));
   $("slotsNow").addEventListener("click",()=>{
     SLOT_ON.clear();
@@ -5913,9 +5987,11 @@ function init(){
   });
   document.querySelector("main").addEventListener("input",e=>{
     if(e.target.id==="worldMin" || e.target.id==="worldCont") renderWorld();
+    if(e.target.id==="sportQ"){ renderSports(); const el=$("sportQ"); if(el){ el.focus(); el.setSelectionRange(el.value.length,el.value.length); } return; }
     if(e.target.id==="worldQ"){ WQ = e.target.value.trim(); renderWorld(); const q = $("worldQ"); if(q){ q.focus(); q.setSelectionRange(q.value.length,q.value.length); } }
   });
   document.querySelector("main").addEventListener("change",e=>{
+    if(e.target.id==="sportScope"){ renderSports(); return; }
     if(e.target.id==="auState"){ renderAU(); return; }
     if(e.target.id==="worldCont"){ renderWorld(); return; }
     if(e.target.id==="worldSort"){ WSORT = e.target.value; worldFiltersSave(); renderWorld(); return; }
