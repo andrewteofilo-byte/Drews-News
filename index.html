@@ -138,6 +138,8 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .ktest{font-size:12.5px;margin:4px 0;word-break:break-word}
 .ktest.ok{color:var(--nbc)} .ktest.bad{color:#ff9d97} .ktest.off{color:var(--dim)}
 .boringquote{font-style:italic;color:var(--dim);font-size:13.5px;margin:4px 0 8px}
+.interestrow{border-left-color:var(--amber)}
+.interestrow b{color:var(--amber)}
 .dullrow{display:grid;grid-template-columns:44px 1fr;gap:10px;padding:8px 12px;background:var(--row);border-left:3px solid #4a5f7d;margin-bottom:4px}
 .dullrow b{font-family:var(--display);font-size:22px;color:var(--dim);text-align:center}
 .dullrow a{text-decoration:none}
@@ -308,6 +310,7 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <label class="toggle"><input type="checkbox" id="fOnair"><span>Only markets with a newscast on air now</span></label>
     <label class="toggle"><input type="checkbox" id="fReported"><span>Only stories a local station is already on</span></label>
     <label class="toggle"><input type="checkbox" id="fPinned"><span>Only pinned markets</span></label>
+    <label class="toggle"><input type="checkbox" id="showInterest" checked><span>Show the interesting desk (the odd, the old, the accountability piece)</span></label>
     <label class="toggle"><input type="checkbox" id="showBoring" checked><span>Show the boring desk (ribbon cuttings, council votes, fair week)</span></label>
     <details class="typebox" id="dullbox">
       <summary id="dullsum">Boring types</summary>
@@ -394,6 +397,10 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
   <div id="list">
     <div class="empty"><b>Tap Sweep all markets</b>Pulls the last three hours of local breaking news, plus anything big from the last 24, and shows which stations in each market would carry it. Nothing refreshes on its own.</div>
   </div>
+  <details class="unplaced" id="interestBox" hidden open>
+    <summary id="interestSum">Interesting desk</summary>
+    <div id="interest"></div>
+  </details>
   <details class="unplaced" id="boringBox" hidden>
     <summary id="boringSum">Boring desk</summary>
     <p class="boringquote">&ldquo;'Cause you're boring.&rdquo; &mdash; Carney Porter to Michael Bohling, KFDX 10pm, 25 February 2026</p>
@@ -1858,6 +1865,32 @@ function casualties(text){
   if(t) killed = Math.max(killed,+t[1]);
   return {killed, injured};
 }
+/* ================= THE INTERESTING DESK =================
+   Between "someone was stabbed" and "the council met" is the stuff local newsrooms are actually
+   good at: the odd, the old, the accountability piece, the animal on the loose. Checked before the
+   boring desk, so a story that could be either lands here. */
+const INTEREST_OUT = /\b(killed|died|dead|fatal|murder|homicide|victim|funeral|memorial|assault|abuse|suicide|overdose)\b/i;
+const INTERESTING = [
+ {id:"accountability", label:"Accountability", pts:88, re:/\b(investigation (found|finds|reveals)|records (show|reveal|obtained)|documents (show|reveal)|audit (finds|found)|exclusive|i-?team|watchdog|whistleblower|uncovered|failed to disclose|spent \$[\d,.]+|no[- ]bid)\b/i},
+ {id:"oddity", label:"Odd and unusual", pts:84, re:/\b(bizarre|strange|unusual|mystery|mysterious|unexplained|one of a kind|only one in|never seen before|baffl\w+|turns out to be|prank|hoax)\b/i},
+ {id:"record", label:"Record or first", pts:80, re:/\b(world record|state record|record[- ]breaking|first (ever|in the (state|country)|of its kind)|oldest|largest|smallest|tallest|rarest|only (surviving|known))\b/i},
+ {id:"animal", label:"Animal story", pts:78, re:/\b(bear|alligator|moose|bison|emu|llama|zebra|kangaroo|python|peacock|escaped (cow|cattle|horse|goat|pig|dog)s?|loose (cow|horse|goat|emu)|stray (dog|cat)|puppies|kittens|baby (deer|owl|eagle)|nest(ing)? (eagles?|owls?)|wandering (dog|cow|horse))\b/i},
+ {id:"history", label:"History and finds", pts:76, re:/\b(archaeolog\w+|artifact|time capsule|century[- ]old|\d{3}[- ]year[- ]old (building|church|house|tree)|historic (find|marker|building|home)|shipwreck|fossil|unearth\w+|museum (acquires|unveils)|long[- ]lost)\b/i},
+ {id:"sky", label:"Sky and science", pts:74, re:/\b(meteor|fireball|northern lights|aurora|eclipse|comet|meteor shower|supermoon|telescope|space ?launch|rocket (launch|visible))\b/i},
+ {id:"weird_crime", label:"Odd crime", pts:72, re:/\b(stole \d+ (gnomes|flamingos|signs|shopping carts)|caught on camera (stealing|dancing)|porch pirate|drove into a (pool|lake)|golf cart (chase|theft)|stolen (statue|bench|mailbox))\b/i},
+ {id:"character", label:"Local character", pts:70, re:/\b(\d{2,3}[- ]year[- ]old (man|woman|veteran|volunteer)|turns 1\d\d|retir\w+ after \d+ years|longtime|beloved|legendary|hand[- ]built|homemade|self[- ]taught)\b/i},
+ {id:"goodturn", label:"Good turn", pts:66, re:/\b(returns? (a )?lost|reunited with|random act|pays? it forward|anonymous donor|buys? groceries|helped a stranger)\b/i}
+];
+function classifyInteresting(text){
+  if(INTEREST_OUT.test(text)) return null;
+  const hits = INTERESTING.filter(r=>r.re.test(text));
+  if(!hits.length) return null;
+  hits.sort((a,b)=>b.pts-a.pts);
+  return hits[0];
+}
+let INTEREST_LIST = [];
+let SHOW_INTEREST = true;
+
 /* ================= THE BORING DESK =================
    Station feeds carry everything a newsroom publishes, so what the breaking test rejects is the
    rest of the rundown: ribbon cuttings, council votes, fair week. Rated for dullness instead, and
@@ -3829,13 +3862,29 @@ function build(){
   /* 2. classify and place each headline */
   const items = [];
   const dull = [];
+  INTEREST_LIST = [];
   byKey.forEach(s=>{
     const text = [...s.texts].join(" ");
     const cls = classify(text);
     if(!cls){
+      const interesting = classifyInteresting(text);
       let stDmaS = null;
       for(const c of s.calls){ if(CALL[c]!=null){ stDmaS = CALL[c]; break; } }
       addSport("local", s.title, s.url, s.ms, [...s.sources].slice(0,2).join(", "), stDmaS!=null?DMAS[stDmaS].m:"");
+      if(interesting){
+        let iDma = null, iCall = null;
+        for(const c of s.calls){ if(CALL[c]!=null){ iDma = CALL[c]; iCall = c; break; } }
+        const pl = placeStory(text + " " + [...s.sources].join(" "), iDma);
+        let dma = pl.dma;
+        if(dma==null && s.scanDmas.size){
+          const hit = pl.cands.filter(c=>s.scanDmas.has(c));
+          if(hit.length===1) dma = hit[0];
+        }
+        INTEREST_LIST.push({rule:interesting, dma, repCall: dma===iDma ? iCall : null,
+          score: Math.max(20, Math.min(99, interesting.pts + Math.min(10,(s.sources.size-1)*4))),
+          ageMin:(Date.now()-s.ms)/60000, title:s.title, url:s.url, sources:s.sources, ms:s.ms});
+        return;
+      }
       const b = classifyBoring(text);
       if(b){
         let stDma = null, stCall = null;
@@ -3966,6 +4015,7 @@ function build(){
   STORIES = out;
   dull.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
   BORING_LIST = dull;
+  INTEREST_LIST.sort((a,b)=>b.score-a.score || a.ageMin-b.ageMin);
 }
 /* keys seen before the latest pull, frozen per pull so re-renders don't clear New badges */
 const SEEN_ALL = new Set();
@@ -4019,7 +4069,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {boring:SHOW_BORING, dulls:[...BORING_ON], zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {interest:SHOW_INTEREST, boring:SHOW_BORING, dulls:[...BORING_ON], zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -4216,6 +4266,7 @@ function render(){
     }).join("");
   }
   renderFilters();
+  renderInteresting();
   renderBoring();
   $("unplacedBox").hidden = !unplaced.length || VIEW==="porter" || VIEW==="world" || VIEW==="networks" || VIEW==="au";
   $("unplacedSum").textContent = unplaced.length+" stor"+(unplaced.length===1?"y":"ies")+" couldn't be placed in a market";
@@ -5414,6 +5465,9 @@ function rundownText(){
   const nd = natState.checked ? natDoctrineBN() : null;
   const extraTags = natState.tags.filter(t=>!nd || !nd.t.includes(t));
   const natHead = nd ? "\nNATIONAL DESK: "+nd.t+(extraTags.length?" ("+extraTags.join(", ")+")":"")+(natState.heads[0]?" · "+natState.heads[0]:"") : "";
+  const intTxt = SHOW_INTEREST && interestVisible().length
+    ? "\n\nINTERESTING DESK\n"+interestVisible().slice(0,10).map(b=>"["+b.score+"] "+(b.dma!=null?DMAS[b.dma].m:"market unclear")+" · "+b.rule.label+" · "+b.title).join("\n")
+    : "";
   const dullTxt = SHOW_BORING && boringVisible().length
     ? "\n\nBORING DESK\n"+boringVisible().slice(0,15).map(b=>"["+b.score+" dull] "+(b.dma!=null?DMAS[b.dma].m:"market unclear")+" · "+b.rule.label+" · "+b.title).join("\n")
     : "";
@@ -5427,7 +5481,7 @@ function rundownText(){
     const air = slotFor(d, SLOT_ON.size?SLOT_ON:null);
     return "["+x.score+"] "+d.m+" · "+x.cls.rule.label+" · "+ago(x.ageMin)+(x.big?" · "+(x.old?"STILL BIG":"BIG")+" ("+x.bigWhy.join(", ")+")":"")+(air?" · "+air.label+" window":"")+
       "\n"+x.s.title+(x.s.es&&x.s.orig?"\n("+x.s.orig+")":"")+"\n"+stns+"\n"+x.s.url;
-  }).join("\n\n")+dullTxt;
+  }).join("\n\n")+intTxt+dullTxt;
 }
 async function copyText(txt, btn){
   let ok = false;
@@ -5462,6 +5516,35 @@ function boringVisible(){
     }
     return true;
   });
+}
+function interestVisible(){
+  const terms = parseTerms(QTXT);
+  return INTEREST_LIST.filter(b=>{
+    const d = b.dma!=null ? DMAS[b.dma] : null;
+    if(REGION_ONLY && REGION!=="ALL" && !(d && inRegion(d))) return false;
+    if(FLAGS.pinned && !(d && PINS.has(d.m))) return false;
+    if(SIZE!=="any" && !(d && SIZE_TEST[SIZE](d.rank))) return false;
+    if(ZONE_ON.size && !(d && ZONE_ON.has(zoneOf(d)))) return false;
+    if(terms.length){
+      const hay = (b.title+" "+[...b.sources].join(" ")+" "+b.rule.label+" "+(d?d.m+" "+d.city:"")).toLowerCase();
+      if(!terms.every(t=>hay.includes(t))) return false;
+    }
+    return true;
+  });
+}
+function renderInteresting(){
+  const list = SHOW_INTEREST ? interestVisible() : [];
+  $("interestBox").hidden = !list.length || VIEW==="porter" || VIEW==="world" || VIEW==="networks" || VIEW==="au" || VIEW==="sport";
+  if(!list.length) return;
+  $("interestSum").textContent = "Interesting desk · "+list.length+" stor"+(list.length===1?"y":"ies")+" worth a look";
+  $("interest").innerHTML = list.slice(0,40).map(b=>{
+    const d = b.dma!=null ? DMAS[b.dma] : null;
+    return '<div class="dullrow interestrow"><b>'+b.score+'</b><div>'+
+      '<div class="meta"><span class="cat">'+esc(b.rule.label)+'</span><span>'+ago(b.ageMin)+'</span>'+
+        (d?'<span>'+esc(d.m)+'</span>':'<span>market unclear</span>')+
+        (b.repCall?'<span>'+esc(b.repCall)+'</span>':'')+'</div>'+
+      '<a href="'+esc(b.url)+'" target="_blank" rel="noopener">'+esc(b.title)+'</a></div></div>';
+  }).join("");
 }
 function renderBoring(){
   const list = SHOW_BORING ? boringVisible() : [];
@@ -5614,6 +5697,7 @@ function init(){
     filtersSave(); render();
   });
   $("showBoring").addEventListener("change",e=>{ SHOW_BORING=e.target.checked; filtersSave(); render(); });
+  $("showInterest").addEventListener("change",e=>{ SHOW_INTEREST=e.target.checked; filtersSave(); render(); });
   const drawZones = () => {
     $("zones").innerHTML = ZONES.map(([code,label])=>{
       const n = DMAS.filter(d=>zoneOf(d)===code).length;
@@ -6038,6 +6122,7 @@ function init(){
     if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
     if(f.worldWin) WORLD_WINDOW = +f.worldWin;
     if(typeof f.localMode==="boolean"){ LOCAL_MODE=f.localMode; $("localMode").checked=f.localMode; setBusy(false); }
+    if(typeof f.interest==="boolean"){ SHOW_INTEREST=f.interest; $("showInterest").checked=f.interest; }
     if(typeof f.boring==="boolean"){ SHOW_BORING=f.boring; $("showBoring").checked=f.boring; }
     if(Array.isArray(f.dulls)){
       BORING_ON.clear(); f.dulls.forEach(x=>BORING_ON.add(x));
