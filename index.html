@@ -365,6 +365,13 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
     <div id="feedList"></div>
     <div id="feedCover"></div>
     <button class="btn wide" id="paperSurvey">Add the local paper in every market</button>
+    <button class="btn wide" id="radioSurvey">Add public radio newsrooms</button>
+    <button class="btn wide" id="officialSurvey">Add state transport and emergency feeds</button>
+    <button class="btn wide" id="gsiteSurvey">Reach the stations that block us (via Google)</button>
+    <div class="row2" style="margin-top:10px">
+      <button class="btn" id="feedExport">Export feeds</button>
+      <label class="btn" style="text-align:center;cursor:pointer">Import<input type="file" id="feedImportFile" accept="application/json" hidden></label>
+    </div>
     <button class="btn wide" id="testFeeds">Test station feeds</button>
     <div id="feedTest"></div>
     <button class="btn wide" id="testConn">Test the connection</button>
@@ -3464,6 +3471,108 @@ const TIERS = {top:{lo:1,hi:50,max:4,label:"Markets 1–50"}, mid:{lo:51,hi:100,
 const TOP_N = 50, EXTRA_MAX = 4;
 /* Papers and Patch for markets that already have a station feed: they go in as extra feeds, so a
    local sweep reads the paper alongside the newsrooms. */
+/* ---- 1. Stations that refuse automated reads ----
+   Sinclair and Tegna sites answer nothing, so those newsrooms are invisible. Google indexes them
+   anyway, and a search restricted to one domain returns that newsroom's own stories with its
+   byline and timestamp. Slower than a feed and it goes through the public relays, but it puts the
+   missing newsroom back on the board. */
+function siteSearchUrl(dom){
+  return "https://news.google.com/rss/search?q="+encodeURIComponent("site:"+dom+" when:1d")+"&hl=en-US&gl=US&ceid=US:en";
+}
+function blockedStations(){
+  const out = [];
+  DMAS.forEach(d=>{
+    const f = FEEDMAP[d.m]; if(!f) return;
+    const have = new Set([f.call].concat((f.extra||[]).map(e=>e.call)).filter(Boolean).map(baseCall));
+    d.all.forEach(st=>{
+      const b = baseCall(st.call), dom = CALL_DOMAIN[b];
+      if(!dom || have.has(b)) return;
+      const fp = FEEDPATH[dom];
+      if(!fp || fp.path) return;    /* only sites we have actually tried and found nothing on */
+      if((f.extra||[]).some(e=>e.dom===dom)) return;  /* already added */
+      out.push({d, call:st.call, dom});
+    });
+  });
+  return out;
+}
+async function addSiteSearches(onProgress, max){
+  const todo = blockedStations().slice(0, max||120);
+  let added = 0;
+  for(const job of todo){
+    const f = FEEDMAP[job.d.m]; if(!f) continue;
+    f.extra = f.extra || [];
+    if(f.extra.some(e=>e.dom===job.dom)) continue;
+    f.extra.push({call:job.call, dom:job.dom, url:siteSearchUrl(job.dom), kind:"gsite"});
+    added++;
+    if(added%20===0) onProgress && onProgress(added+" stations added");
+  }
+  feedMapSave();
+  return added;
+}
+
+/* ---- 2. Public radio ----
+   A member newsroom in most markets, usually on a platform that publishes a clean feed and doesn't
+   block. Strongest where TV is thin: small markets, overnight, state capitol coverage. */
+const PUBRADIO = {"New York":[["WNYC","gothamist.com"]],"Los Angeles":[["LAist","laist.com"]],"Chicago":[["WBEZ","wbez.org"]],"Philadelphia":[["WHYY","whyy.org"]],"Dallas-Ft. Worth":[["KERA","keranews.org"]],"Houston":[["Houston Public Media","houstonpublicmedia.org"]],"Atlanta":[["WABE","wabe.org"]],"Washington DC":[["WAMU","wamu.org"]],"Boston":[["WBUR","wbur.org"]],"San Francisco-Oak-San Jose":[["KQED","kqed.org"]],"Phoenix":[["KJZZ","kjzz.org"]],"Tampa-St. Petersburg":[["WUSF","wusf.org"]],"Seattle-Tacoma":[["KUOW","kuow.org"]],"Detroit":[["Michigan Public","michiganpublic.org"]],"Minneapolis-St. Paul":[["MPR News","mprnews.org"]],"Denver":[["CPR News","cpr.org"]],"Orlando-Daytona-Melbourne":[["WMFE","wmfe.org"]],"Miami-Ft. Lauderdale":[["WLRN","wlrn.org"]],"Cleveland-Akron":[["Ideastream","ideastream.org"]],"Sacramento-Stockton-Modesto":[["CapRadio","capradio.org"]],"Charlotte":[["WFAE","wfae.org"]],"Portland, OR":[["OPB","opb.org"]],"St. Louis":[["St. Louis Public Radio","stlpr.org"]],"Pittsburgh":[["WESA","wesa.fm"]],"Raleigh-Durham":[["WUNC","wunc.org"]],"Indianapolis":[["WFYI","wfyi.org"]],"San Diego":[["KPBS","kpbs.org"]],"Nashville":[["WPLN","wpln.org"]],"Baltimore":[["WYPR","wypr.org"]],"Salt Lake City":[["KUER","kuer.org"]],"San Antonio":[["Texas Public Radio","tpr.org"]],"Columbus, OH":[["WOSU","wosu.org"]],"Kansas City":[["KCUR","kcur.org"]],"Milwaukee":[["WUWM","wuwm.com"]],"Hartford-New Haven":[["Connecticut Public","ctpublic.org"]],"Las Vegas":[["Nevada Public Radio","knpr.org"]],"Cincinnati":[["WVXU","wvxu.org"]],"Greenville-Spartanburg-Asheville":[["BPR","bpr.org"]],"Austin":[["KUT","kut.org"]],"Oklahoma City":[["KOSU","kosu.org"]],"Harrisburg-Lancaster-York":[["WITF","witf.org"]],"Jacksonville":[["WJCT","news.wjct.org"]],"Greensboro-High Point-Winston-Salem":[["WFDD","wfdd.org"]],"West Palm Beach-Ft. Pierce":[["WQCS","wqcs.org"]],"Grand Rapids-Kalamazoo":[["WGVU","wgvunews.org"]],"Norfolk-Portsmouth-Newport News":[["WHRO","whro.org"]],"Birmingham":[["WBHM","wbhm.org"]],"Albuquerque-Santa Fe":[["KUNM","kunm.org"]],"Memphis":[["WKNO","wkno.org"]],"Buffalo":[["WBFO","wbfo.org"]],"Louisville":[["LPM","lpm.org"]],"New Orleans":[["WWNO","wwno.org"]],"Fresno-Visalia":[["KVPR","kvpr.org"]],"Richmond-Petersburg":[["VPM","vpm.org"]],"Providence-New Bedford":[["The Public's Radio","thepublicsradio.org"]],"Ft. Myers-Naples":[["WGCU","wgcu.org"]],"Wilkes Barre-Scranton":[["WVIA","wvia.org"]],"Little Rock-Pine Bluff":[["KUAR","ualrpublicradio.org"]],"Albany-Schenectady-Troy":[["WAMC","wamc.org"]],"Knoxville":[["WUOT","wuot.org"]],"Tulsa":[["KWGS","publicradiotulsa.org"]],"Mobile-Pensacola":[["WHIL","whil.org"]],"Dayton":[["WYSO","wyso.org"]],"Lexington":[["WEKU","weku.fm"]],"Charleston-Huntington":[["WVPB","wvpublic.org"]],"Flint-Saginaw-Bay City":[["WKAR","wkar.org"]],"Wichita-Hutchinson":[["KMUW","kmuw.org"]],"Roanoke-Lynchburg":[["WVTF","wvtf.org"]],"Green Bay-Appleton":[["WPR","wpr.org"]],"Tucson":[["AZPM","news.azpm.org"]],"Honolulu":[["HPR","hawaiipublicradio.org"]],"Des Moines-Ames":[["Iowa Public Radio","iowapublicradio.org"]],"Springfield, MO":[["KSMU","ksmu.org"]],"Omaha":[["Nebraska Public Media","nebraskapublicmedia.org"]],"Rochester, NY":[["WXXI","wxxinews.org"]],"Columbia, SC":[["SC Public Radio","southcarolinapublicradio.org"]],"Portland-Auburn":[["Maine Public","mainepublic.org"]],"Toledo":[["WGTE","wgte.org"]],"Huntsville-Decatur-Florence":[["WLRH","wlrh.org"]],"Spokane":[["SPR","spokanepublicradio.org"]],"Syracuse":[["WAER","waer.org"]],"Champaign-Springfield-Decatur":[["Illinois Public Media","will.illinois.edu"]],"Madison":[["WPR Madison","wpr.org"]],"Chattanooga":[["WUTC","wutc.org"]],"Colorado Springs-Pueblo":[["KRCC","krcc.org"]],"El Paso":[["KTEP","ktep.org"]],"Cedar Rapids-Waterloo-Dubuque":[["IPR","iowapublicradio.org"]],"Savannah":[["GPB Savannah","gpb.org"]],"Charleston, SC":[["SC Public Radio Charleston","southcarolinapublicradio.org"]],"Jackson, MS":[["MPB","mpbonline.org"]],"Baton Rouge":[["WRKF","wrkf.org"]],"Tri-Cities, TN-VA":[["WETS","wets.org"]],"Burlington-Plattsburgh":[["Vermont Public","vermontpublic.org"]],"Waco-Temple-Bryan":[["KWBU","kwbu.org"]],"Ft. Wayne":[["WBOI","wboi.org"]],"Boise":[["Boise State Public Radio","boisestatepublicradio.org"]],"Myrtle Beach-Florence":[["WHMC","southcarolinapublicradio.org"]],"Lincoln-Hastings-Kearney":[["NET","nebraskapublicmedia.org"]],"Evansville":[["WNIN","wnin.org"]],"Tallahassee-Thomasville":[["WFSU","wfsu.org"]],"South Bend-Elkhart":[["WVPE","wvpe.org"]],"Augusta-Aiken":[["WACG","gpb.org"]],"Springfield-Holyoke":[["NEPM","nepm.org"]],"Sioux Falls-Mitchell":[["SDPB","sdpb.org"]],"Lansing":[["WKAR Lansing","wkar.org"]],"Youngstown":[["WYSU","wysu.org"]],"Peoria-Bloomington":[["WCBU","wcbu.org"]],"Traverse City-Cadillac":[["IPR News","interlochenpublicradio.org"]],"Tyler-Longview":[["KETR","ketr.org"]],"Fargo-Valley City":[["Prairie Public","news.prairiepublic.org"]],"Montgomery-Selma":[["Troy Public Radio","troypublicradio.org"]],"Reno":[["KUNR","kunr.org"]],"Yakima-Pasco-Richland":[["NWPB","nwpb.org"]],"Eugene":[["KLCC","klcc.org"]],"Santa Barbara-Santa Maria-San Luis Obispo":[["KCBX","kcbx.org"]],"Macon":[["GPB Macon","gpb.org"]],"Lafayette, LA":[["KRVS","krvs.org"]],"Bakersfield":[["Valley Public Radio","kvpr.org"]],"Monterey-Salinas":[["KAZU","kazu.org"]],"La Crosse-Eau Claire":[["WPR Eau Claire","wpr.org"]],"Corpus Christi":[["KEDT","kedt.org"]],"Amarillo":[["HPPR","hppr.org"]],"Chico-Redding":[["NSPR","mynspr.org"]],"Columbus, GA":[["WJSP","gpb.org"]],"Wausau-Rhinelander":[["WXPR","wxpr.org"]],"Wilmington":[["WHQR","whqr.org"]],"Columbia-Jefferson City":[["KBIA","kbia.org"]],"Rockford":[["WNIJ","northernpublicradio.org"]],"Duluth-Superior":[["WDSE","kaxe.org"]],"Terre Haute":[["WFIU Terre Haute","indianapublicmedia.org"]],"Medford-Klamath Falls":[["JPR","ijpr.org"]],"Beaumont-Port Arthur":[["KVLU","kvlu.org"]],"Sioux City":[["KWIT","kwit.org"]],"Minot-Bismarck-Dickinson":[["Prairie Public ND","news.prairiepublic.org"]],"Wichita Falls-Lawton":[["KETR Texoma","ketr.org"]],"Erie":[["WQLN","wqln.org"]],"Joplin-Pittsburg":[["KRPS","krps.org"]],"Lubbock":[["KTTZ","kttz.org"]],"Bangor":[["Maine Public Bangor","mainepublic.org"]],"Odessa-Midland":[["Marfa Public Radio","marfapublicradio.org"]],"Panama City":[["WFSU Panama City","wfsu.org"]],"Binghamton":[["WSKG","wskg.org"]],"Biloxi-Gulfport":[["MPB Gulf","mpbonline.org"]],"Gainesville":[["WUFT","wuft.org"]],"Idaho Falls-Pocatello":[["KISU","kisu.org"]],"Abilene-Sweetwater":[["KACU","kacu.org"]],"Missoula":[["MTPR","mtpr.org"]],"Billings":[["YPR","ypradio.org"]],"Rapid City":[["SDPB Rapid City","sdpb.org"]],"Anchorage":[["Alaska Public Media","alaskapublic.org"]],"Topeka":[["KANU","kansaspublicradio.org"]],"Palm Springs":[["KVCR","kvcrnews.org"]],"Twin Falls":[["Boise State Public Radio Twin Falls","boisestatepublicradio.org"]],"Bend":[["OPB Bend","opb.org"]],"Eureka":[["KHSU","khsu.org"]],"Casper-Riverton":[["Wyoming Public Media","wyomingpublicmedia.org"]],"Cheyenne-Scottsbluff":[["WPM Cheyenne","wyomingpublicmedia.org"]],"Juneau":[["KTOO","ktoo.org"]],"Fairbanks":[["KUAC","kuac.org"]],"Charlottesville":[["WMRA","wmra.org"]],"Harrisonburg":[["WMRA Harrisonburg","wmra.org"]],"Laredo":[["TPR Laredo","tpr.org"]],"Victoria":[["TPR Victoria","tpr.org"]],"Alpena":[["WCMU","wcmu.org"]],"Marquette":[["WNMU","wnmufm.org"]],"Great Falls":[["MTPR Great Falls","mtpr.org"]],"Helena":[["MTPR Helena","mtpr.org"]],"Butte-Bozeman":[["MTPR Bozeman","mtpr.org"]],"Grand Junction-Montrose":[["KAFM","kafmradio.org"]],"Bowling Green":[["WKU Public Radio","wkyufm.org"]],"Jonesboro":[["KASU","kasu.org"]],"Meridian":[["MPB Meridian","mpbonline.org"]],"Lafayette, IN":[["WBAA","wbaa.org"]],"Monroe-El Dorado":[["KEDM","kedm.org"]],"Lake Charles":[["KVLU Lake Charles","kvlu.org"]],"Alexandria, LA":[["KLSA","redriverradio.org"]],"Shreveport":[["Red River Radio","redriverradio.org"]],"Watertown":[["NCPR","northcountrypublicradio.org"]],"Utica":[["WRVO","wrvo.org"]],"Elmira-Corning":[["WSKG Elmira","wskg.org"]],"Zanesville":[["WOUB","woub.org"]],"Parkersburg":[["WVPB Parkersburg","wvpublic.org"]],"Clarksburg-Weston":[["WVPB Clarksburg","wvpublic.org"]],"Bluefield-Beckley-Oak Hill":[["WVPB Beckley","wvpublic.org"]],"Wheeling-Steubenville":[["WVPB Wheeling","wvpublic.org"]],"Lima":[["WGLE","wgte.org"]],"Dothan":[["Troy Public Radio Dothan","troypublicradio.org"]],"Albany, GA":[["WJSP Albany","gpb.org"]],"Hattiesburg-Laurel":[["MPB Hattiesburg","mpbonline.org"]],"Greenwood-Greenville":[["MPB Delta","mpbonline.org"]],"Columbus-Tupelo-West Point":[["MPB Tupelo","mpbonline.org"]],"Jackson, TN":[["WKNO Jackson","wkno.org"]],"Paducah-Cape Girardeau-Harrisburg":[["WKMS","wkms.org"]],"Quincy-Hannibal-Keokuk":[["TSPR","tspr.org"]],"Ottumwa-Kirksville":[["KRNU","iowapublicradio.org"]],"St. Joseph":[["KCUR St Joseph","kcur.org"]],"North Platte":[["NET North Platte","nebraskapublicmedia.org"]],"Mankato":[["KMSU","kmsu.org"]],"Rochester-Mason City-Austin":[["KSMQ","ksmq.org"]],"San Angelo":[["KACU San Angelo","kacu.org"]],"Presque Isle":[["Maine Public Presque Isle","mainepublic.org"]],"Glendive":[["Prairie Public Glendive","news.prairiepublic.org"]],"Yuma-El Centro":[["KAWC","kawc.org"]]};
+/* ---- 3. Official feeds ----
+   State transport and emergency management. Not journalism, and never credited as a newsroom, but
+   often the first public word on a closure or an incident. */
+const OFFICIAL_FEEDS = {"AL":["https://www.algotraffic.com/rss","https://ema.alabama.gov/feed/"],"AK":["https://www.alaskanavigator.org/rss","https://ready.alaska.gov/feed"],"AZ":["https://www.az511.gov/rss","https://dps.az.gov/feed"],"AR":["https://www.idrivearkansas.com/rss","https://www.ardot.gov/feed/"],"CA":["https://roads.dot.ca.gov/rss","https://www.caloes.ca.gov/feed/"],"CO":["https://www.cotrip.org/rss","https://dfpc.colorado.gov/feed"],"CT":["https://portal.ct.gov/rss","https://cttravelsmart.org/rss"],"FL":["https://fl511.com/rss","https://www.floridadisaster.org/feed/"],"GA":["https://www.511ga.org/rss","https://gema.georgia.gov/feed"],"ID":["https://511.idaho.gov/rss","https://ioem.idaho.gov/feed/"],"IL":["https://www.gettingaroundillinois.com/rss","https://www2.illinois.gov/iema/feed"],"IN":["https://511in.org/rss","https://www.in.gov/dhs/feed/"],"IA":["https://511ia.org/rss","https://homelandsecurity.iowa.gov/feed/"],"KS":["https://www.kandrive.gov/rss","https://www.kansastag.gov/feed"],"KY":["https://goky.ky.gov/rss","https://kyem.ky.gov/feed"],"LA":["https://www.511la.org/rss","https://gohsep.la.gov/feed"],"ME":["https://www.newengland511.org/rss","https://www.maine.gov/mema/feed"],"MD":["https://chart.maryland.gov/rss","https://mema.maryland.gov/feed"],"MA":["https://mass511.com/rss","https://www.mass.gov/feed"],"MI":["https://mi.gov/drive/rss","https://www.michigan.gov/msp/feed"],"MN":["https://511mn.org/rss","https://dps.mn.gov/feed"],"MS":["https://www.mdottraffic.com/rss","https://www.msema.org/feed/"],"MO":["https://traveler.modot.org/rss","https://sema.dps.mo.gov/feed"],"MT":["https://511mt.net/rss","https://des.mt.gov/feed"],"NE":["https://511.nebraska.gov/rss","https://nema.nebraska.gov/feed"],"NV":["https://www.nvroads.com/rss","https://dem.nv.gov/feed"],"NH":["https://www.newengland511.org/rss","https://www.nh.gov/safety/feed"],"NJ":["https://511nj.org/rss","https://www.nj.gov/njoem/feed"],"NM":["https://nmroads.com/rss","https://www.nmdhsem.org/feed/"],"NY":["https://511ny.org/rss","https://www.dhses.ny.gov/feed"],"NC":["https://drivenc.gov/rss","https://www.ncdps.gov/feed"],"ND":["https://travel.dot.nd.gov/rss","https://www.des.nd.gov/feed"],"OH":["https://www.ohgo.com/rss","https://ema.ohio.gov/feed"],"OK":["https://oktraffic.org/rss","https://oklahoma.gov/oem/feed"],"OR":["https://tripcheck.com/rss","https://www.oregon.gov/oem/feed"],"PA":["https://www.511pa.com/rss","https://www.pema.pa.gov/feed"],"RI":["https://www.newengland511.org/rss","https://riema.ri.gov/feed"],"SC":["https://www.511sc.org/rss","https://www.scemd.org/feed/"],"SD":["https://sd511.org/rss","https://oem.sd.gov/feed"],"TN":["https://smartway.tn.gov/rss","https://www.tn.gov/tema/feed"],"TX":["https://drivetexas.org/rss","https://www.tdem.texas.gov/feed"],"UT":["https://udottraffic.utah.gov/rss","https://dps.utah.gov/feed"],"VT":["https://newengland511.org/rss","https://vem.vermont.gov/feed"],"VA":["https://www.511virginia.org/rss","https://www.vaemergency.gov/feed"],"WA":["https://wsdot.com/traffic/rss/","https://mil.wa.gov/feed"],"WV":["https://www.wv511.org/rss","https://emd.wv.gov/feed"],"WI":["https://511wi.gov/rss","https://wem.wi.gov/feed"],"WY":["https://www.wyoroad.info/rss","https://hls.wyo.gov/feed"],"DE":["https://deldot.gov/rss","https://dema.delaware.gov/feed"],"HI":["https://hidot.hawaii.gov/feed/","https://dod.hawaii.gov/hiema/feed/"]};
+async function surveyExtraSources(kind, onProgress){
+  if(!PROXY_URL || !BATCH_OK) return 0;
+  const tries = [];
+  if(kind==="radio"){
+    DMAS.forEach(d=>{
+      if(!FEEDMAP[d.m]) return;
+      if((FEEDMAP[d.m].extra||[]).some(e=>e.kind==="radio")) return;
+      (PUBRADIO[d.m]||[]).forEach(([name,dom])=>{
+        tries.push({d, name, dom, url:"https://"+dom+"/", home:true});
+        ["/feed/","/rss","/feeds/news.rss","/news.rss","/rss.xml"].forEach(pt=>tries.push({d, name, dom, url:"https://"+dom+pt}));
+      });
+    });
+  }else{
+    const seen = new Set();
+    DMAS.forEach(d=>{
+      if(!FEEDMAP[d.m]) return;
+      if((FEEDMAP[d.m].extra||[]).some(e=>e.kind==="official")) return;
+      (OFFICIAL_FEEDS[d.st]||[]).forEach(u=>{
+        const k = d.m+"|"+u; if(seen.has(k)) return; seen.add(k);
+        tries.push({d, name:d.st+" official", dom:hostOf(u), url:u});
+      });
+    });
+  }
+  let added = 0;
+  const got = new Set();
+  for(let i=0;i<tries.length;i+=25){
+    const slice = tries.slice(i,i+25).filter(x=>!got.has(x.d.m+"|"+x.name));
+    if(!slice.length) continue;
+    let res = []; try{ res = await proxyBatch(slice.map(x=>x.url)); }catch(e){}
+    const extra = [];
+    res.forEach(r=>{
+      const job = slice.find(x=>x.url===r.url); if(!job || !r.body) return;
+      if(job.home){ feedLinksIn(r.body, job.url).slice(0,2).forEach(u=>extra.push({d:job.d, name:job.name, dom:job.dom, url:u})); return; }
+      if(r.ok && /<(rss|feed|item)[\s>]/i.test(r.body) && parseRss(r.body).length){
+        const f = FEEDMAP[job.d.m]; f.extra = f.extra || [];
+        if(!f.extra.some(e=>e.url===job.url)){ f.extra.push({call:null, paper:job.name, dom:job.dom, url:job.url, kind:kind}); added++; }
+        got.add(job.d.m+"|"+job.name);
+      }
+    });
+    if(extra.length){
+      let res2 = []; try{ res2 = await proxyBatch(extra.slice(0,25).map(x=>x.url)); }catch(e){}
+      res2.forEach(r=>{
+        const job = extra.find(x=>x.url===r.url); if(!job || got.has(job.d.m+"|"+job.name)) return;
+        if(r.ok && r.body && parseRss(r.body).length){
+          const f = FEEDMAP[job.d.m]; f.extra = f.extra || [];
+          if(!f.extra.some(e=>e.url===job.url)){ f.extra.push({call:null, paper:job.name, dom:job.dom, url:job.url, kind:kind}); added++; }
+          got.add(job.d.m+"|"+job.name);
+        }
+      });
+    }
+    onProgress && onProgress(kind==="radio"?"public radio · "+added+" found":"official feeds · "+added+" found");
+  }
+  feedMapSave();
+  return added;
+}
 async function surveyPapersAll(onProgress, limit){
   if(!PROXY_URL || !BATCH_OK) return 0;
   const todo = DMAS.filter(d=>FEEDMAP[d.m] && !(FEEDMAP[d.m].extra||[]).some(e=>e.paper))
@@ -3632,15 +3741,15 @@ function renderFeedCoverage(){
 function allLocalFeeds(){
   const reads = [], seen = new Map();
   /* a site shared by two markets is fetched once but still counted for both */
-  const add = (d, call, paper, url) => {
+  const add = (d, call, paper, url, kind) => {
     if(!url) return;
     if(seen.has(url)){ const r = seen.get(url); if(!r.ids.includes(d.id)) r.ids.push(d.id); return; }
-    const r = {d, call, paper, url, ids:[d.id]}; seen.set(url, r); reads.push(r);
+    const r = {d, call, paper, url, kind, ids:[d.id]}; seen.set(url, r); reads.push(r); return r;
   };
   DMAS.forEach(d=>{
     const f = FEEDMAP[d.m];
     if(f && f.via!=="rss2json") add(d, f.call, f.paper, f.url);
-    if(f) (f.extra||[]).forEach(e=>add(d, e.call, e.paper||null, e.url));
+    if(f) (f.extra||[]).forEach(e=>{ const r = add(d, e.call, e.paper||null, e.url, e.kind); if(r && e.dom) r.dom = e.dom; });
     d.all.forEach(st=>{
       const dom = CALL_DOMAIN[baseCall(st.call)];
       const fp = dom && FEEDPATH[dom];
@@ -3662,8 +3771,22 @@ async function localSweep(){
   const viaR2J = DMAS.filter(d=>FEEDMAP[d.m] && FEEDMAP[d.m].via==="rss2json");
   const unmapped = DMAS.filter(d=>!FEEDMAP[d.m]);
   const jobs = [];
-  for(let i=0;i<reads.length;i+=25){
-    const slice = reads.slice(i,i+25);
+  /* Google site searches can't go through the worker, so they are read one at a time via the relays */
+  const relayReads = reads.filter(r=>r.kind==="gsite");
+  const batchReads = reads.filter(r=>r.kind!=="gsite");
+  relayReads.forEach(rd=>jobs.push((async()=>{
+    try{
+      const items = await fetchFeed(rd.url);
+      const arts = items.filter(it=>it.date && Date.now()-it.date < 24*3600e3).slice(0,15)
+        .map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:baseCall(rd.call),
+                   srcUrl:"https://"+(rd.dom||hostOf(rd.url)), desc:it.desc||"", prov:"station", viaSearch:true}));
+      HEALTH.station.items += arts.length;
+      ingest(arts, rd.ids || [rd.d.id]);
+      livePaint();
+    }catch(e){}
+  })()));
+  for(let i=0;i<batchReads.length;i+=25){
+    const slice = batchReads.slice(i,i+25);
     jobs.push((async()=>{
       try{
         let results;
@@ -3679,7 +3802,8 @@ async function localSweep(){
           if(!FEEDMAP[d.m].call && FEEDMAP[d.m].paper){ HEALTH.paper = HEALTH.paper || {ok:0,fail:0,items:0}; }
           const items = res.items || (res.ok && res.body && /<(rss|feed|item)[\s>]/i.test(res.body) ? parseRss(res.body) : []);
           if(!items.length){ return; }
-          const call = rd.call;
+          /* an official feed is a source, not a newsroom: no call sign, so nothing is credited to it */
+          const call = rd.kind==="official" ? null : rd.call;
           const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(rd.paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
           HEALTH.station.items += arts.length;
           ingest(arts, rd.ids || [d.id]);
@@ -5815,6 +5939,32 @@ function init(){
   });
   $("scriptMode").checked = SCRIPT_MODE;
   $("scriptMode").addEventListener("change",e=>{ SCRIPT_MODE = e.target.checked || FILE_MODE; CACHE.clear(); });
+  $("radioSurvey").addEventListener("click",async()=>{
+    if(busy || !PROXY_URL) return;
+    const btn = $("radioSurvey");
+    busy = true; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    const n = await surveyExtraSources("radio", msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Add public radio newsrooms";
+    progress(1,1,"Added "+n+" public radio feeds.");
+  });
+  $("officialSurvey").addEventListener("click",async()=>{
+    if(busy || !PROXY_URL) return;
+    const btn = $("officialSurvey");
+    busy = true; btn.disabled = true; btn.textContent = "Checking…"; beginPull();
+    const n = await surveyExtraSources("official", msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Add state transport and emergency feeds";
+    progress(1,1,"Added "+n+" official feeds. These are flagged as official, not as a newsroom.");
+  });
+  $("gsiteSurvey").addEventListener("click",async()=>{
+    if(busy) return;
+    const btn = $("gsiteSurvey");
+    const waiting = blockedStations().length;
+    if(!waiting){ progress(1,1,"Every station with a website already has a feed."); return; }
+    busy = true; btn.disabled = true; btn.textContent = "Adding…"; beginPull();
+    const n = await addSiteSearches(msg=>{ btn.textContent = msg; });
+    busy = false; btn.disabled = false; btn.textContent = "Reach the stations that block us (via Google)";
+    progress(1,1,"Added "+n+" stations by site search. These read through the public relays, so sweeps will be a little slower.");
+  });
   $("paperSurvey").addEventListener("click",async()=>{
     if(busy || !PROXY_URL) return;
     const btn = $("paperSurvey");
@@ -5822,6 +5972,51 @@ function init(){
     const n = await surveyPapersAll(msg=>{ btn.textContent = msg; });
     busy = false; btn.disabled = false; btn.textContent = "Add the local paper in every market";
     progress(1,1,"Added "+n+" newspaper feeds. A local sweep now reads them alongside the stations.");
+  });
+  /* Everything the surveys have proven on this device, as one file: the feed per market, the extra
+     stations and papers, the learned paths, and the world, wire, network and Australian feeds.
+     Another page can read this instead of surveying from scratch. */
+  $("feedExport").addEventListener("click",()=>{
+    const data = {
+      kind: "drews-secret-hyperlocal-feeds",
+      version: 1,
+      exported: new Date().toISOString(),
+      markets: FEEDMAP,
+      learnedPaths: FEEDPATH,
+      world: WORLDFEED,
+      wires: WIRES,
+      networks: NETFEEDS,
+      australia: AUFEEDS
+    };
+    const counts = Object.keys(FEEDMAP).length+" markets, "+
+      DMAS.reduce((n,d)=>n+((FEEDMAP[d.m]&&FEEDMAP[d.m].extra)||[]).length,0)+" extra feeds, "+
+      Object.keys(WORLDFEED).length+" countries";
+    const blob = new Blob([JSON.stringify(data,null,1)], {type:"application/json"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "hyperlocal-feeds-"+new Date().toISOString().slice(0,10)+".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    progress(1,1,"Exported "+counts+".");
+  });
+  $("feedImportFile").addEventListener("change",async e=>{
+    const f = e.target.files && e.target.files[0]; if(!f) return;
+    try{
+      const data = JSON.parse(await f.text());
+      if(data.kind!=="drews-secret-hyperlocal-feeds") throw new Error("that file isn't a feed export");
+      let added = 0;
+      Object.keys(data.markets||{}).forEach(m=>{ if(!FEEDMAP[m]){ FEEDMAP[m] = data.markets[m]; added++; } });
+      Object.keys(data.learnedPaths||{}).forEach(d=>{ if(!FEEDPATH[d]) FEEDPATH[d] = data.learnedPaths[d]; });
+      Object.keys(data.world||{}).forEach(c=>{ if(!WORLDFEED[c]) WORLDFEED[c] = data.world[c]; });
+      Object.keys(data.wires||{}).forEach(k=>{ if(!WIRES[k]) WIRES[k] = data.wires[k]; });
+      Object.keys(data.networks||{}).forEach(k=>{ if(!NETFEEDS[k]) NETFEEDS[k] = data.networks[k]; });
+      Object.keys(data.australia||{}).forEach(k=>{ if(!AUFEEDS[k]) AUFEEDS[k] = data.australia[k]; });
+      feedMapSave(); feedPathSave(); worldFeedSave();
+      storeSet(WIRE_KEY, WIRES); storeSet(NETFEED_KEY, NETFEEDS); storeSet(AUFEED_KEY, AUFEEDS);
+      renderWorldCoverage(); renderNetCoverage(); renderAUCoverage(); renderFeedCoverage(); renderFeedList();
+      progress(1,1,"Imported: "+added+" markets added, nothing already here was overwritten.");
+    }catch(err){ progress(1,1,"Import failed: "+((err&&err.message)||"bad file")); }
+    e.target.value = "";
   });
   $("testFeeds").addEventListener("click",async()=>{
     const box = $("feedTest"), btn = $("testFeeds");
