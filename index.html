@@ -145,6 +145,8 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .dullrow a{text-decoration:none}
 .dullrow a:hover{text-decoration:underline}
 .dullrow .quiet{color:var(--amber);font-weight:600}
+.stn.idx{opacity:.92;border-style:dashed}
+.idxnote{font-size:12.5px;color:var(--dim);margin-top:4px;border-left:2px solid var(--dim);padding-left:7px}
 .whyscore{margin-top:6px;font-size:12.5px;color:var(--dim)}
 .whyscore summary{cursor:pointer}
 .whyscore span{display:inline-block;margin:3px 10px 0 0;white-space:nowrap}
@@ -3977,6 +3979,7 @@ function build(){
     s.ms = Math.max(s.ms, a.ms); s.first = Math.min(s.first, a.ms);
     if(a.source) s.sources.add(a.source.trim());
     s.provs.add(a.prov);
+    if(a.viaSearch){ s.indexed = s.indexed || new Set(); const ic = stationFrom(a.source, a.srcUrl); if(ic) s.indexed.add(ic); }
     s.texts.add(a.title+" "+(a.desc||""));
     const c = stationFrom(a.source, a.srcUrl);
     if(c) s.calls.add(c);
@@ -4083,6 +4086,8 @@ function build(){
     const m = c.members;
     const sources = new Set(), provs = new Set();
     let ms = 0, first = Infinity, text = "";
+    const indexed = new Set();
+    m.forEach(x=>{ if(x.s.indexed) x.s.indexed.forEach(v=>indexed.add(v)); });
     m.forEach(x=>{ x.s.sources.forEach(v=>sources.add(v)); x.s.provs.forEach(v=>provs.add(v)); ms=Math.max(ms,x.s.ms); first=Math.min(first,x.s.first); text += " "+x.text; });
     const best = m.slice().sort((a,b)=>b.cls.rule.pts-a.cls.rule.pts)[0];
     const cls = best.cls;
@@ -4129,7 +4134,7 @@ function build(){
     out.push({
       s:{title:lead.s.title, url:lead.s.url, ms, first, sources, provs, orig:lead.s.orig, translated:lead.s.translated, es:lead.s.es},
       cls, dma:c.dma, via:lead.via, cands:lead.cands, repCall, score, ageMin, why,
-      big, bigWhy, old: ageMin > 180, merged:m.length, shared, carriers,
+      big, bigWhy, old: ageMin > 180, merged:m.length, shared, carriers, indexed,
       id: normKey(lead.s.title), keys: m.map(x=>normKey(x.s.title))
     });
   });
@@ -4225,20 +4230,21 @@ function ago(min){ return min<1 ? "just now" : min<60 ? Math.round(min)+" min ag
 function localTime(tz){
   try{ return new Intl.DateTimeFormat("en-US",{timeZone:tz,hour:"numeric",minute:"2-digit",timeZoneName:"short"}).format(new Date()); }catch(e){ return ""; }
 }
-function stationChips(d, repCall){
+function stationChips(d, repCall, idxSet){
   const exact = repCall && d.all.some(s=>s.call===repCall);
   return d.all.map(st=>{
     const rep = repCall && (exact ? st.call===repCall : baseCall(st.call)===repCall) ? " rep" : "";
     const cls = st.big4 ? st.net.toLowerCase() : "oth";
     const s = statusOf(st, d.tz);
     let note = "", dim = "";
+    const viaIdx = idxSet && idxSet.has(baseCall(st.call));
     if(s.state==="on") note = '<b class="live">● '+esc(s.label.toLowerCase())+'</b>';
     else if(s.state==="next" && s.mins<=90) note = esc(s.label.toLowerCase())+" in "+s.mins+"m";
     else if(s.state==="none"){ note = "no local news"; dim = " dim"; }
     if(note && s.modelled && s.state!=="none") note += "*";
     const nat = natAffects(st, d.tz) ? " natx" : "";
     const title = NET_NAME[st.net]+(st.owner?" · "+st.owner:"")+(st.note?" · "+st.note:"")+(s.state==="next"?" · next: "+s.label+" at "+fmtLocalHour(s.s):"")+(s.modelled?" · weekend or pattern schedule, modelled":"")+(nat?" · network likely in special coverage":"");
-    return '<span class="stn '+cls+rep+dim+nat+'" title="'+esc(title)+'"><i>'+esc(st.net)+'</i><span>'+esc(st.call)+(rep?" · reporting":"")+(note?' <small>'+note+'</small>':'')+(nat?' <small class="natm">◉ net special</small>':'')+'</span>'+
+    return '<span class="stn '+cls+rep+dim+nat+(viaIdx?" idx":"")+'" title="'+esc(title)+(viaIdx?" · reached through a Google site search, not their own feed":"")+'"><i>'+esc(st.net)+'</i><span>'+esc(st.call)+(rep?(viaIdx?" · indexed":" · reporting"):"")+(note?' <small>'+note+'</small>':'')+(nat?' <small class="natm">◉ net special</small>':'')+'</span>'+
       (st.feed?'<a class="watch" href="'+esc(st.feed.u)+'" target="_blank" rel="noopener" title="'+esc(st.feed.n)+'">▶</a>':'')+'</span>';
   }).join("");
 }
@@ -4322,8 +4328,10 @@ function storyRow(x){
   const srcs = [...x.s.sources].slice(0,4).join(", ");
   const more = x.s.sources.size>4 ? " +"+(x.s.sources.size-4) : "";
   let mkt = "";
+  const idxTag = (x.indexed && x.indexed.size)
+    ? '<div class="idxnote">'+esc([...x.indexed].join(", "))+(x.indexed.size===1?" reached":" reached")+' through a Google site search, not their own feed — times are Google\'s</div>' : "";
   if(d){
-    mkt = '<div class="mkt"><button class="star" data-pin="'+esc(d.m)+'" aria-pressed="'+PINS.has(d.m)+'" title="Pin this market">'+(PINS.has(d.m)?"★":"☆")+'</button><span class="name">'+esc(d.m)+'</span><span class="lt">#'+Math.floor(d.rank)+'</span><span class="lt">'+esc(localTime(d.tz))+' there</span>'+onAir(d)+'<div class="stations">'+stationChips(d,x.repCall)+'</div>'+(d.shared.length?'<div class="shared">'+esc(d.shared.join(" · "))+'</div>':'')+'</div>';
+    mkt = '<div class="mkt"><button class="star" data-pin="'+esc(d.m)+'" aria-pressed="'+PINS.has(d.m)+'" title="Pin this market">'+(PINS.has(d.m)?"★":"☆")+'</button><span class="name">'+esc(d.m)+'</span><span class="lt">#'+Math.floor(d.rank)+'</span><span class="lt">'+esc(localTime(d.tz))+' there</span>'+onAir(d)+'<div class="stations">'+stationChips(d,x.repCall,x.indexed)+'</div>'+idxTag+(d.shared.length?'<div class="shared">'+esc(d.shared.join(" · "))+'</div>':'')+'</div>';
   }else if(x.cands.length){
     mkt = '<div class="mkt"><span class="unsure">Could be '+x.cands.slice(0,3).map(i=>esc(DMAS[i].m)).join(" or ")+' (no state named)</span></div>';
   }
