@@ -146,6 +146,7 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .dullrow a:hover{text-decoration:underline}
 .dullrow .quiet{color:var(--amber);font-weight:600}
 .stn.idx{opacity:.92;border-style:dashed}
+.idxtag{background:#2b3a52;color:#9fb6d6;border-radius:3px;padding:0 6px;font-weight:600}
 .idxnote{font-size:12.5px;color:var(--dim);margin-top:4px;border-left:2px solid var(--dim);padding-left:7px}
 .whyscore{margin-top:6px;font-size:12.5px;color:var(--dim)}
 .whyscore summary{cursor:pointer}
@@ -290,6 +291,8 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <button class="chip" data-min="60" aria-pressed="false">60+ lead story</button>
       <button class="chip" data-min="80" aria-pressed="false">80+ cut in</button>
     </div>
+    <p class="lab" style="margin-top:10px">Which feeds to read</p>
+    <div class="chips" id="sources"></div>
     <p class="lab" style="margin-top:10px">Time zone</p>
     <div class="chips" id="zones"></div>
     <label class="lab" for="size" style="margin-top:10px">Market size</label>
@@ -1899,6 +1902,7 @@ function classifyInteresting(text){
 }
 let INTEREST_LIST = [];
 let SHOW_INTEREST = true;
+let drawSourceChips = null;
 
 /* ================= THE BORING DESK =================
    Station feeds carry everything a newsroom publishes, so what the breaking test rejects is the
@@ -3217,9 +3221,16 @@ let FEEDMAP = {};          /* market -> {call, url, t} */
 let LOCAL_MODE = false;
 function feedMapLoad(){
   storeGet("ds-hyperlocal-lastpass",null).then(v=>{ LAST_PASS = v; renderPassReport(); });
-  return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; renderFeedCoverage(); renderFeedList(); });
+  return storeGet(FEEDMAP_KEY,{}).then(v=>{ FEEDMAP = v||{}; rebuildSearchOnly(); renderFeedCoverage(); renderFeedList(); });
 }
-function feedMapSave(){ storeSet(FEEDMAP_KEY, FEEDMAP); renderFeedCoverage(); renderFeedList(); }
+const SEARCH_ONLY = new Set();   /* stations reached only through a Google site search */
+function rebuildSearchOnly(){
+  SEARCH_ONLY.clear();
+  Object.keys(FEEDMAP).forEach(m=>{
+    (FEEDMAP[m].extra||[]).forEach(e=>{ if(e.kind==="gsite" && e.call) SEARCH_ONLY.add(baseCall(e.call)); });
+  });
+}
+function feedMapSave(){ rebuildSearchOnly(); storeSet(FEEDMAP_KEY, FEEDMAP); renderFeedCoverage(); renderFeedList(); }
 /* Newspapers for the markets where every station site refuses automated requests. Paths are
    guesses by platform; the survey tests them and reads each homepage's advertised feed as well. */
 /* A daily (and usually a second, often a non-profit newsroom) for all 210 markets. Papers frequently
@@ -3711,12 +3722,19 @@ function renderFeedList(){
     return '<details class="whybox"><summary>'+label+'</summary>'+list.map(d=>{
       const f = FEEDMAP[d.m];
       if(!f) return '<div class="ktest off">#'+Math.floor(d.rank)+' '+esc(d.m)+': Google local edition</div>';
-      const names = [f.call ? f.call : (f.paper ? f.paper+" (newspaper)" : "?")].concat((f.extra||[]).map(e=>e.call));
+      const names = [f.call ? f.call : (f.paper ? f.paper+" (newspaper)" : "?")]
+        .concat((f.extra||[]).map(e=>{
+          if(e.kind==="gsite") return (e.call||e.dom)+" (Google search)";
+          if(e.kind==="radio") return (e.paper||e.dom)+" (public radio)";
+          if(e.kind==="official") return (e.paper||e.dom)+" (official)";
+          return e.call || (e.paper?e.paper+" (newspaper)":e.dom);
+        }));
       return '<div class="ktest ok">#'+Math.floor(d.rank)+' '+esc(d.m)+': '+esc(names.join(", "))+(f.via==="rss2json"?' <span class="dimtxt">via rss2json</span>':'')+'</div>';
     }).join("")+'</details>';
   }).join("");
 }
 function renderFeedCoverage(){
+  if(typeof drawSourceChips === "function") drawSourceChips();
   const box = $("feedCover"); if(!box) return;
   const have = DMAS.filter(d=>FEEDMAP[d.m]).length;
   const missing = DMAS.filter(d=>!FEEDMAP[d.m]);
@@ -3733,13 +3751,36 @@ function renderFeedCoverage(){
   if(have){
     const all = allLocalFeeds();
     const r2j = DMAS.filter(d=>FEEDMAP[d.m]&&FEEDMAP[d.m].via==="rss2json").length;
-    box.innerHTML = '<div class="ktest ok">A local sweep reads '+(all.length+r2j)+' feeds across 210 markets.</div>' + box.innerHTML;
+    const kinds = {gsite:0,radio:0,official:0,paper:0};
+    DMAS.forEach(d=>(FEEDMAP[d.m]&&FEEDMAP[d.m].extra||[]).forEach(e=>{
+      if(e.kind && kinds[e.kind]!==undefined) kinds[e.kind]++; else if(e.paper) kinds.paper++;
+    }));
+    const parts = [];
+    if(kinds.paper) parts.push(kinds.paper+" newspaper");
+    if(kinds.radio) parts.push(kinds.radio+" public radio");
+    if(kinds.official) parts.push(kinds.official+" official");
+    box.innerHTML = '<div class="ktest ok">A local sweep reads '+(all.length+r2j)+' feeds across 210 markets'+(parts.length?", including "+parts.join(", "):"")+'.</div>'+
+      (kinds.gsite?'<div class="ktest off">'+kinds.gsite+' stations are reached through a Google site search rather than their own feed — their chips show as dashed and are credited as indexed.</div>':'') + box.innerHTML;
   }
 }
 /* Every working feed the page knows about, one entry per feed address:
    each market's main feed (unless it only works through rss2json), every extra station from the
    tier passes, and any station whose feed was found some other way — the feed tester, direct mode
    or a fast sweep — which is remembered per site but was never part of the local sweep. */
+/* Which kinds of feed a local sweep reads. "direct" is a newsroom's own feed; "gsite" is a Google
+   site search standing in for a station that blocks us; the rest are what they say. */
+const SOURCE_KINDS = [["direct","Station feeds"],["gsite","Indexed stations"],["paper","Newspapers"],["radio","Public radio"],["official","Official feeds"]];
+const SOURCE_ON = new Set(SOURCE_KINDS.map(k=>k[0]));
+const kindOf = e => e.kind ? e.kind : (e.paper ? "paper" : "direct");
+function sourceCounts(){
+  const c = {};
+  DMAS.forEach(d=>{
+    const f = FEEDMAP[d.m]; if(!f) return;
+    const k0 = f.paper ? "paper" : "direct"; c[k0] = (c[k0]||0)+1;
+    (f.extra||[]).forEach(e=>{ const k = kindOf(e); c[k] = (c[k]||0)+1; });
+  });
+  return c;
+}
 function allLocalFeeds(){
   const reads = [], seen = new Map();
   /* a site shared by two markets is fetched once but still counted for both */
@@ -3750,8 +3791,11 @@ function allLocalFeeds(){
   };
   DMAS.forEach(d=>{
     const f = FEEDMAP[d.m];
-    if(f && f.via!=="rss2json") add(d, f.call, f.paper, f.url);
-    if(f) (f.extra||[]).forEach(e=>{ const r = add(d, e.call, e.paper||null, e.url, e.kind); if(r && e.dom) r.dom = e.dom; });
+    if(f && f.via!=="rss2json" && SOURCE_ON.has(f.paper?"paper":"direct")) add(d, f.call, f.paper, f.url);
+    if(f) (f.extra||[]).forEach(e=>{
+      if(!SOURCE_ON.has(kindOf(e))) return;
+      const r = add(d, e.call, e.paper||null, e.url, e.kind); if(r && e.dom) r.dom = e.dom;
+    });
     d.all.forEach(st=>{
       const dom = CALL_DOMAIN[baseCall(st.call)];
       const fp = dom && FEEDPATH[dom];
@@ -3780,7 +3824,7 @@ async function localSweep(){
     try{
       const items = await fetchFeed(rd.url);
       const arts = items.filter(it=>it.date && Date.now()-it.date < 24*3600e3).slice(0,15)
-        .map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:baseCall(rd.call),
+        .map(it=>({skind:"gsite", title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:baseCall(rd.call),
                    srcUrl:"https://"+(rd.dom||hostOf(rd.url)), desc:it.desc||"", prov:"station", viaSearch:true}));
       HEALTH.station.items += arts.length;
       ingest(arts, rd.ids || [rd.d.id]);
@@ -3806,7 +3850,7 @@ async function localSweep(){
           if(!items.length){ return; }
           /* an official feed is a source, not a newsroom: no call sign, so nothing is credited to it */
           const call = rd.kind==="official" ? null : rd.call;
-          const arts = items.map(it=>({title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(rd.paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
+          const arts = items.map(it=>({skind: rd.kind || (rd.paper?"paper":"direct"), title:cleanTitle(it.title,it.src), url:it.link, ms:it.date, source:call?baseCall(call):(rd.paper||""), srcUrl:"https://"+hostOf(res.url), desc:(it.desc||"")+" "+(it.author||""), prov:call?"station":"paper", feedMkt:d.id}));
           HEALTH.station.items += arts.length;
           ingest(arts, rd.ids || [d.id]);
         });
@@ -4198,7 +4242,7 @@ function airIn(x){
 }
 const FILTER_KEY = "ds-hyperlocal-filters";
 function filtersSave(){
-  storeSet(FILTER_KEY, {interest:SHOW_INTEREST, boring:SHOW_BORING, dulls:[...BORING_ON], zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
+  storeSet(FILTER_KEY, {sources:[...SOURCE_ON], interest:SHOW_INTEREST, boring:SHOW_BORING, dulls:[...BORING_ON], zones:[...ZONE_ON], worldWin:WORLD_WINDOW, yahoo:useYahoo, local:USE_LOCAL, spanish:USE_SPANISH, direct:DIRECT_MODE, fast:FAST_MODE, localMode:LOCAL_MODE, cats:[...CAT_ON], min:MIN, flags:FLAGS, big:SHOW_BIG, region:REGION, regionOnly:REGION_ONLY, slots:[...SLOT_ON], size:SIZE, sort:SORT});
 }
 /* everything a story can be searched by: headline, outlets, market, its towns, state, calls, networks, owners, category */
 function hayFor(x){
@@ -4237,14 +4281,14 @@ function stationChips(d, repCall, idxSet){
     const cls = st.big4 ? st.net.toLowerCase() : "oth";
     const s = statusOf(st, d.tz);
     let note = "", dim = "";
-    const viaIdx = idxSet && idxSet.has(baseCall(st.call));
+    const viaIdx = SEARCH_ONLY.has(baseCall(st.call)) || (idxSet && idxSet.has(baseCall(st.call)));
     if(s.state==="on") note = '<b class="live">● '+esc(s.label.toLowerCase())+'</b>';
     else if(s.state==="next" && s.mins<=90) note = esc(s.label.toLowerCase())+" in "+s.mins+"m";
     else if(s.state==="none"){ note = "no local news"; dim = " dim"; }
     if(note && s.modelled && s.state!=="none") note += "*";
     const nat = natAffects(st, d.tz) ? " natx" : "";
     const title = NET_NAME[st.net]+(st.owner?" · "+st.owner:"")+(st.note?" · "+st.note:"")+(s.state==="next"?" · next: "+s.label+" at "+fmtLocalHour(s.s):"")+(s.modelled?" · weekend or pattern schedule, modelled":"")+(nat?" · network likely in special coverage":"");
-    return '<span class="stn '+cls+rep+dim+nat+(viaIdx?" idx":"")+'" title="'+esc(title)+(viaIdx?" · reached through a Google site search, not their own feed":"")+'"><i>'+esc(st.net)+'</i><span>'+esc(st.call)+(rep?(viaIdx?" · indexed":" · reporting"):"")+(note?' <small>'+note+'</small>':'')+(nat?' <small class="natm">◉ net special</small>':'')+'</span>'+
+    return '<span class="stn '+cls+rep+dim+nat+(viaIdx?" idx":"")+'" title="'+esc(title)+(viaIdx?" · reached through a Google site search, not their own feed":"")+'"><i>'+esc(st.net)+'</i><span>'+esc(st.call)+(rep?(viaIdx?" · indexed":" · reporting"):(viaIdx?" · indexed":""))+(note?' <small>'+note+'</small>':'')+(nat?' <small class="natm">◉ net special</small>':'')+'</span>'+
       (st.feed?'<a class="watch" href="'+esc(st.feed.u)+'" target="_blank" rel="noopener" title="'+esc(st.feed.n)+'">▶</a>':'')+'</span>';
   }).join("");
 }
@@ -4339,7 +4383,7 @@ function storyRow(x){
   return '<article class="story '+heat(x.score)+(x.old?" old":"")+'">'+
     '<div class="score"><b>'+x.score+'</b><span>must<br>watch</span></div>'+
     '<div>'+
-      '<div class="meta">'+(x.s.leadIn&&x.s.leadIn.size?'<span class="leadtag">Leading in '+esc([...x.s.leadIn].map(z=>{const c=COUNTRIES.find(y=>y.i===z);return c?c.n:z;}).slice(0,2).join(", "))+'</span>':'')+(x.isNew?'<span class="newtag">New</span>':'')+'<span class="cat">'+esc(x.cls.rule.label)+'</span><span class="'+(x.ageMin<=30?"fresh":"")+'">'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+(x.merged>1?'<span>'+x.merged+' versions merged</span>':'')+'</div>'+
+      '<div class="meta">'+((x.indexed&&x.indexed.size)?'<span class="idxtag" title="One of these newsrooms was reached through a Google site search">Indexed</span>':'')+(x.s.leadIn&&x.s.leadIn.size?'<span class="leadtag">Leading in '+esc([...x.s.leadIn].map(z=>{const c=COUNTRIES.find(y=>y.i===z);return c?c.n:z;}).slice(0,2).join(", "))+'</span>':'')+(x.isNew?'<span class="newtag">New</span>':'')+'<span class="cat">'+esc(x.cls.rule.label)+'</span><span class="'+(x.ageMin<=30?"fresh":"")+'">'+ago(x.ageMin)+'</span><span>'+x.s.sources.size+' outlet'+(x.s.sources.size===1?"":"s")+'</span>'+(x.merged>1?'<span>'+x.merged+' versions merged</span>':'')+'</div>'+
       '<h3 class="hl">'+(x.s.es?'<span class="eslang">ES</span> ':'')+'<a href="'+esc(x.s.url)+'" target="_blank" rel="noopener">'+esc(x.s.title)+'</a></h3>'+
       (x.s.es && x.s.orig ? '<div class="esorig">'+esc(x.s.orig)+(x.s.translated?'':' · translator unavailable, read through a newsroom glossary')+'</div>' : '')+
       '<div class="src">'+esc(srcs+more)+'</div>'+bigTag+
@@ -5830,6 +5874,22 @@ function init(){
   });
   $("showBoring").addEventListener("change",e=>{ SHOW_BORING=e.target.checked; filtersSave(); render(); });
   $("showInterest").addEventListener("change",e=>{ SHOW_INTEREST=e.target.checked; filtersSave(); render(); });
+  drawSourceChips = () => {
+    const c = sourceCounts();
+    $("sources").innerHTML = SOURCE_KINDS.map(([k,label])=>
+      '<button class="chip" aria-pressed="'+SOURCE_ON.has(k)+'" data-src="'+k+'">'+label+'<b class="cnt"> '+(c[k]||0)+'</b></button>').join("");
+  };
+  drawSourceChips();
+  $("sources").addEventListener("click",e=>{
+    const b = e.target.closest(".chip"); if(!b) return;
+    const k = b.dataset.src;
+    SOURCE_ON.has(k) ? SOURCE_ON.delete(k) : SOURCE_ON.add(k);
+    if(!SOURCE_ON.size) SOURCE_ON.add("direct");      /* never leave it with nothing to read */
+    /* drop what that kind already put on the board, so the board matches the switches */
+    ARTS = ARTS.filter(a=>!a.skind || SOURCE_ON.has(a.skind));
+    build();
+    drawSourceChips(); filtersSave(); renderFeedCoverage(); render();
+  });
   const drawZones = () => {
     $("zones").innerHTML = ZONES.map(([code,label])=>{
       const n = DMAS.filter(d=>zoneOf(d)===code).length;
@@ -6325,6 +6385,10 @@ function init(){
     if(typeof f.fast==="boolean"){ FAST_MODE=f.fast; $("fastMode").checked=f.fast; }
     if(f.worldWin) WORLD_WINDOW = +f.worldWin;
     if(typeof f.localMode==="boolean"){ LOCAL_MODE=f.localMode; $("localMode").checked=f.localMode; setBusy(false); }
+    if(Array.isArray(f.sources) && f.sources.length){
+      SOURCE_ON.clear(); f.sources.forEach(k=>SOURCE_ON.add(k));
+      document.querySelectorAll("#sources .chip").forEach(b=>b.setAttribute("aria-pressed", SOURCE_ON.has(b.dataset.src)));
+    }
     if(typeof f.interest==="boolean"){ SHOW_INTEREST=f.interest; $("showInterest").checked=f.interest; }
     if(typeof f.boring==="boolean"){ SHOW_BORING=f.boring; $("showBoring").checked=f.boring; }
     if(Array.isArray(f.dulls)){
