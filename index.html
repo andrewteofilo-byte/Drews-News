@@ -146,6 +146,7 @@ select.full{width:100%;background:var(--row);border:1px solid var(--line);border
 .dullrow a:hover{text-decoration:underline}
 .dullrow .quiet{color:var(--amber);font-weight:600}
 .stn.idx{opacity:.92;border-style:dashed}
+.chip.preset{border-style:dashed}
 .idxtag{background:#2b3a52;color:#9fb6d6;border-radius:3px;padding:0 6px;font-weight:600}
 .idxnote{font-size:12.5px;color:var(--dim);margin-top:4px;border-left:2px solid var(--dim);padding-left:7px}
 .whyscore{margin-top:6px;font-size:12.5px;color:var(--dim)}
@@ -292,6 +293,11 @@ details.unplaced summary{cursor:pointer;font-family:var(--display);font-size:19p
       <button class="chip" data-min="80" aria-pressed="false">80+ cut in</button>
     </div>
     <p class="lab" style="margin-top:10px">Which feeds to read</p>
+    <div class="chips" id="sourcePresets">
+      <button class="chip preset" data-preset="stations">Stations only</button>
+      <button class="chip preset" data-preset="direct">Direct feeds only</button>
+      <button class="chip preset" data-preset="all">Everything</button>
+    </div>
     <div class="chips" id="sources"></div>
     <p class="lab" style="margin-top:10px">Time zone</p>
     <div class="chips" id="zones"></div>
@@ -5880,6 +5886,19 @@ function init(){
       '<button class="chip" aria-pressed="'+SOURCE_ON.has(k)+'" data-src="'+k+'">'+label+'<b class="cnt"> '+(c[k]||0)+'</b></button>').join("");
   };
   drawSourceChips();
+  /* one tap for the combinations worth having */
+  const PRESETS = {stations:["direct","gsite"], direct:["direct"], all:SOURCE_KINDS.map(k=>k[0])};
+  $("sourcePresets").addEventListener("click",e=>{
+    const b = e.target.closest(".chip"); if(!b) return;
+    const want = PRESETS[b.dataset.preset]; if(!want) return;
+    SOURCE_ON.clear(); want.forEach(k=>SOURCE_ON.add(k));
+    ARTS = ARTS.filter(a=>!a.skind || SOURCE_ON.has(a.skind));
+    build();
+    drawSourceChips(); filtersSave(); renderFeedCoverage(); render();
+    progress(1,1, b.dataset.preset==="stations" ? "Reading station feeds and the indexed stations — every market, newsrooms only."
+      : b.dataset.preset==="direct" ? "Reading only feeds published by the newsrooms themselves."
+      : "Reading everything: stations, indexed stations, newspapers, public radio and official feeds.");
+  });
   $("sources").addEventListener("click",e=>{
     const b = e.target.closest(".chip"); if(!b) return;
     const k = b.dataset.src;
